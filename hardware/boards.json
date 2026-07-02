@@ -1,0 +1,16 @@
+{
+  "boards": [
+    {
+      "role": "follower",
+      "label": "kiwi follower/slave ESP32-S3",
+      "platformio_board": "seeed_xiao_esp32s3",
+      "chip": "esp32s3",
+      "usb_vid_pid": "303A:1001",
+      "usb_serial": "94:A9:90:D0:2E:F0",
+      "mac": "94:a9:90:d0:2e:f0",
+      "first_seen_port": "/dev/cu.usbmodem101",
+      "detected_at_utc": "2026-07-02T03:44:32Z",
+      "notes": "User reported this currently connected board is the follower/slave. Motors are wired to D0/GPIO1, D1/GPIO2, D2/GPIO3. The second Dominion's unused channel input is wired to D3/GPIO4 and must be fed 1500 us or that ESC never arms (both channels of a Dominion need a valid centered pulse). Bench result 2026-07-02: all three motors spin; the D0 motor needs roughly 1850 us to overcome friction while D1/D2 move at 1650 us. Inter-board UART is not wired yet; no encoders installed (I2C mux absent)."
+    }
+  ]
+}
