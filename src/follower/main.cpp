@@ -160,6 +160,13 @@ int32_t signedAs5600Delta(uint16_t current, uint16_t previous) {
   return delta;
 }
 
+float wheelAngleFromRaw(uint8_t index, uint16_t raw) {
+  if (kiwi_config::kEncoderPolarity[index] < 0) {
+    raw = static_cast<uint16_t>((kAs5600CountsPerRev - raw) % kAs5600CountsPerRev);
+  }
+  return (static_cast<float>(raw) * kTwoPi) / kAs5600CountsPerRev;
+}
+
 void seedEncoders() {
   for (uint8_t i = 0; i < 3; ++i) {
     uint16_t raw = 0;
@@ -169,7 +176,7 @@ void seedEncoders() {
       encoders[i].lastRaw = raw;
       encoders[i].count = 0;
       encoders[i].wheelSpeedMps = 0.0f;
-      encoders[i].wheelAngleRad = (static_cast<float>(raw) * kTwoPi) / kAs5600CountsPerRev;
+      encoders[i].wheelAngleRad = wheelAngleFromRaw(i, raw);
       encoders[i].updatedUs = static_cast<uint32_t>(esp_timer_get_time());
       encoders[i].samples = 1;
     } else {
@@ -193,7 +200,7 @@ void updateEncoders() {
       encoder.ready = true;
       encoder.raw = raw;
       encoder.lastRaw = raw;
-      encoder.wheelAngleRad = (static_cast<float>(raw) * kTwoPi) / kAs5600CountsPerRev;
+      encoder.wheelAngleRad = wheelAngleFromRaw(i, raw);
       encoder.updatedUs = nowUs;
       encoder.samples = 1;
       continue;
@@ -209,7 +216,7 @@ void updateEncoders() {
     encoder.count += delta;
     encoder.raw = raw;
     encoder.lastRaw = raw;
-    encoder.wheelAngleRad = (static_cast<float>(raw) * kTwoPi) / kAs5600CountsPerRev;
+    encoder.wheelAngleRad = wheelAngleFromRaw(i, raw);
     encoder.updatedUs = nowUs;
     ++encoder.samples;
   }
@@ -275,11 +282,16 @@ void applyActiveCommand() {
 bool tryBeginImuAt(uint8_t address) {
   tcaDisable();
   Wire.beginTransmission(address);
-  if (Wire.endTransmission() != 0) {
+  const uint8_t err = Wire.endTransmission();
+  if (err != 0) {
+    Serial.printf("BNO08x probe 0x%02x: i2c err=%u (2=NACK, 5=timeout)\n", address, err);
     return false;
   }
 
-  if (!imu.begin(address, Wire, kiwi_config::kImuIntPin, kiwi_config::kImuResetPin)) {
+  // Reset is handled manually in initImu (the library's own hardware reset
+  // probes the chip again before it finishes booting). Passing -1 for INT and
+  // RESET keeps the library in polled mode.
+  if (!imu.begin(address, Wire, -1, -1)) {
     return false;
   }
   imuAddress = address;
@@ -289,11 +301,22 @@ bool tryBeginImuAt(uint8_t address) {
 bool initImu() {
   pinMode(kiwi_config::kImuIntPin, INPUT_PULLUP);
   pinMode(kiwi_config::kImuResetPin, OUTPUT);
+  // Clean reset pulse, then wait out the BNO08x boot time (~100-150 ms) before
+  // probing; probing too early NACKs even with correct wiring.
+  digitalWrite(kiwi_config::kImuResetPin, LOW);
+  delay(20);
   digitalWrite(kiwi_config::kImuResetPin, HIGH);
-  delay(50);
+  delay(1000);
 
-  if (!tryBeginImuAt(kiwi_config::kImuPrimaryAddress) &&
-      !tryBeginImuAt(kiwi_config::kImuSecondaryAddress)) {
+  bool found = false;
+  for (uint8_t attempt = 0; attempt < 3 && !found; ++attempt) {
+    if (attempt > 0) {
+      delay(150);
+    }
+    found = tryBeginImuAt(kiwi_config::kImuPrimaryAddress) ||
+            tryBeginImuAt(kiwi_config::kImuSecondaryAddress);
+  }
+  if (!found) {
     Serial.println("BNO08x not found on follower I2C root bus.");
     return false;
   }
@@ -452,7 +475,7 @@ void loop() {
 
   if (nowMs - lastSerialStatusMs >= 1000) {
     lastSerialStatusMs = nowMs;
-    Serial.printf("follower status cmd=%lu bad=%lu enc_mask=0x%02x imu=%s counts=%lld/%lld/%lld heap=%lu\n",
+    Serial.printf("follower status cmd=%lu bad=%lu enc_mask=0x%02x imu=%s counts=%lld/%lld/%lld enc_err=%lu/%lu/%lu heap=%lu\n",
                   static_cast<unsigned long>(commandsReceived),
                   static_cast<unsigned long>(badPackets),
                   encoderReadyMask(),
@@ -460,6 +483,9 @@ void loop() {
                   static_cast<long long>(encoders[0].count),
                   static_cast<long long>(encoders[1].count),
                   static_cast<long long>(encoders[2].count),
+                  static_cast<unsigned long>(encoders[0].readErrors),
+                  static_cast<unsigned long>(encoders[1].readErrors),
+                  static_cast<unsigned long>(encoders[2].readErrors),
                   static_cast<unsigned long>(ESP.getFreeHeap()));
   }
 

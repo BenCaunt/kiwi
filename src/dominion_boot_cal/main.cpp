@@ -28,11 +28,15 @@ uint32_t pulseUsToDuty(uint16_t pulseUs) {
   return (static_cast<uint32_t>(pulseUs) * maxDuty + (periodUs / 2)) / periodUs;
 }
 
+// The calibration pulse train goes to all four ESC inputs: the three motor
+// pins plus the aux input, so both Dominions see valid signal on both of
+// their channels throughout the sequence.
 void writeAll(uint16_t pulseUs) {
   currentPulseUs = constrain(pulseUs, kiwi_config::kEscMinPulseUs, kiwi_config::kEscMaxPulseUs);
   for (uint8_t i = 0; i < 3; ++i) {
     ledcWrite(kiwi_config::kMotorPwmChannels[i], pulseUsToDuty(currentPulseUs));
   }
+  ledcWrite(kiwi_config::kEscAuxNeutralPwmChannel, pulseUsToDuty(currentPulseUs));
 }
 
 const char *phaseName() {
@@ -51,13 +55,14 @@ const char *phaseName() {
 }
 
 void printStatus() {
-  Serial.printf("boot_cal phase=%s pulse_us=%u elapsed_ms=%lu pins=D0/GPIO%u,D1/GPIO%u,D2/GPIO%u\n",
+  Serial.printf("boot_cal phase=%s pulse_us=%u elapsed_ms=%lu motor_gpios=%u/%u/%u aux_gpio=%u\n",
                 phaseName(),
                 currentPulseUs,
                 static_cast<unsigned long>(millis() - phaseStartedMs),
                 kiwi_config::kMotorPins[0],
                 kiwi_config::kMotorPins[1],
-                kiwi_config::kMotorPins[2]);
+                kiwi_config::kMotorPins[2],
+                kiwi_config::kEscAuxNeutralPin);
 }
 
 void initMotorOutputs() {
@@ -67,6 +72,10 @@ void initMotorOutputs() {
               kiwi_config::kEscPwmResolutionBits);
     ledcAttachPin(kiwi_config::kMotorPins[i], kiwi_config::kMotorPwmChannels[i]);
   }
+  ledcSetup(kiwi_config::kEscAuxNeutralPwmChannel,
+            kiwi_config::kEscPwmFrequencyHz,
+            kiwi_config::kEscPwmResolutionBits);
+  ledcAttachPin(kiwi_config::kEscAuxNeutralPin, kiwi_config::kEscAuxNeutralPwmChannel);
 }
 
 }  // namespace

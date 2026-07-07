@@ -25,16 +25,20 @@ constexpr uint8_t kI2cSclPin = D5;
 constexpr uint32_t kI2cClockHz = 400000;
 constexpr uint8_t kTca9548aAddress = 0x70;
 constexpr uint8_t kAs5600Address = 0x36;
-constexpr uint8_t kEncoderTcaChannels[3] = {0, 1, 2};
-constexpr int8_t kEncoderPolarity[3] = {1, 1, 1};
+// Measured 2026-07-06 with the motor_encoder_map test: motor i drives the
+// wheel whose AS5600 sits on mux channel kEncoderTcaChannels[i]. Polarity is
+// chosen so a positive motor command increases the reported count.
+constexpr uint8_t kEncoderTcaChannels[3] = {1, 0, 2};
+constexpr int8_t kEncoderPolarity[3] = {-1, 1, -1};
 
-// Follower motor outputs. Tune polarity after verifying wheel direction.
-constexpr uint8_t kMotorPins[3] = {D0, D1, D2};
+// Follower motor outputs (same mapping run): the second Dominion's DRIVEN
+// input is on D3 and its arming input is on D1, so D3 is a motor pin here.
+constexpr uint8_t kMotorPins[3] = {D0, D2, D3};
 constexpr uint8_t kMotorPwmChannels[3] = {0, 1, 2};
-// The second Dominion's unused channel input is wired to D3. Dominion dual
+// The second Dominion's unused channel input is wired to D1. Dominion dual
 // ESCs only arm once BOTH channel inputs see a valid centered pulse, so this
 // pin must always output 1500 us.
-constexpr uint8_t kEscAuxNeutralPin = D3;
+constexpr uint8_t kEscAuxNeutralPin = D1;
 constexpr uint8_t kEscAuxNeutralPwmChannel = 3;
 constexpr int8_t kMotorPolarity[3] = {1, 1, 1};
 constexpr uint32_t kEscPwmFrequencyHz = 50;
