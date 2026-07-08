@@ -22,6 +22,7 @@ The follower receives that command over UART, converts body twist into three whe
 pio run -e master
 pio run -e follower
 pio run -e follower_motor_ramp
+pio run -e follower_motor_encoder_map
 pio run -e follower_dominion_boot_cal
 ```
 
@@ -36,12 +37,36 @@ pio run -e follower -t upload
 
 - Each Dominion is a dual ESC and only arms when **both** channel inputs see a
   valid centered pulse. The second ESC's unused channel input is wired to
-  `D3/GPIO4`, which every firmware must hold at `1500 us` (see
-  `kEscAuxNeutralPin`). Leaving it floating produces the 5-blink signal-timeout
-  failsafe and that ESC never drives its motor.
+  `D1/GPIO2` (as of the 2026-07-07 rewiring), which every firmware must hold at
+  `1500 us` (see `kEscAuxNeutralPin`). Leaving it floating produces the 5-blink
+  signal-timeout failsafe and that ESC never drives its motor.
 - A 5-blinking ESC needs an ESC power cycle after the signal is fixed.
-- The motor on `D0` needs roughly `1850 us` (~70%) to start turning; `D1`/`D2`
-  move at `1650 us` (~30%). Account for this deadband in kinematics tuning.
+- Motor deadbands vary per motor; the stiffest needed roughly `1850 us` (~70%)
+  to start turning while the others move at `1650 us` (~30%). Account for this
+  deadband in kinematics tuning.
+
+## Motor -> Encoder Mapping (measured 2026-07-07)
+
+Measured with the `follower_motor_encoder_map` firmware and recorded in
+`include/robot_config.h`:
+
+| Firmware motor | Pin | Encoder mux channel | Positive command |
+|---|---|---|---|
+| motor 0 | `D0/GPIO1` | ch1 | counts decrease (polarity `-1`) |
+| motor 1 | `D2/GPIO3` | ch0 | counts increase (polarity `+1`) |
+| motor 2 | `D3/GPIO4` | ch2 | counts decrease (polarity `-1`) |
+| aux neutral | `D1/GPIO2` | - | second Dominion arming input |
+
+The second Dominion's *driven* input is on `D3`; the input the firmware pins at
+neutral for arming is `D1`. `kEncoderPolarity` is chosen so a positive motor
+command increases that motor's reported count.
+
+The `follower_motor_encoder_map` environment is the bring-up/diagnostic tool.
+It auto-runs a mapping pass (each motor +/- for 2 s while sampling all
+encoders) 7 s after boot; send `s` over USB serial to cancel. Commands: `map`,
+`power <pct>`, `watch <sec>` (hand-spin identification), `probe` (AS5600
+presence + magnet status), `scan` (I2C bus scan), `pintest` (SDA/SCL
+short/stuck detection), `aux <pct>` (drive the aux pin), `clock <khz>`, `s`.
 
 ## Follower Motor Ramp Test
 
@@ -139,9 +164,10 @@ Follower:
 
 - master UART: RX `D6`, TX `D7`, 460800 baud
 - I2C mux and IMU root bus: SDA `D4`, SCL `D5`
-- motor PWM: `D0`, `D1`, `D2`
+- motor PWM: `D0`, `D2`, `D3` (aux neutral for the second Dominion: `D1`)
 - BNO08x: INT `D9`, RESET `D8`
-- AS5600 mux channels: `0`, `1`, `2`
+- AS5600 mux channels: `1`, `0`, `2` for motors 0/1/2 (PCA9548A at `0x70`,
+  A0/A1/A2 tied to GND)
 
 Cross the UART wires between boards: master TX to follower RX, follower TX to master RX, and common ground.
 
@@ -159,5 +185,8 @@ Default namespace is `kiwi/xiao`.
 
 - Set `kWheelRadiusM`, `kDriveBaseRadiusM`, `kMaxWheelSurfaceSpeedMps`.
 - Verify `kWheelAnglesRad` matches the physical wheel order.
-- Flip `kMotorPolarity` and `kEncoderPolarity` per wheel after bench testing.
+- `kEncoderPolarity` is measured (2026-07-07); still verify `kMotorPolarity`
+  against the kinematic wheel directions with a driving test.
+- Re-seat the ch0 AS5600 magnet: it reports magnet-not-detected (`md=0`) and
+  drops counts under fast motion. All three magnets read on the weak side.
 - Confirm the LD19 variant frame format and baud rate. The parser currently locks to `0x54 0x2c` 47-byte frames and publishes raw frames.
