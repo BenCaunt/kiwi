@@ -131,7 +131,8 @@ Edit [include/robot_config.h](include/robot_config.h) when wiring changes.
 Master:
 
 - follower UART: RX `D6`, TX `D7`, 460800 baud
-- LD19 lidar UART: RX `D4`, TX `D5`, 230400 baud
+- LD19 lidar data (lidar TX -> master RX): `D4`, 230400 baud; lidar has no serial RX
+- LD19 lidar PWM speed control: `D3`, held low so the lidar self-regulates ~10 Hz (this unit does not spin with PWM floating). Raise `kLidarPwmDuty` for external RPM control.
 - camera: Seeed XIAO ESP32S3 Sense camera connector
 
 Follower:

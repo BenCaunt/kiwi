@@ -14,10 +14,21 @@ constexpr uint8_t kFollowerUartTxPin = D7;
 constexpr uint32_t kFollowerUartBaud = 460800;
 
 // Master-only LD19/FHL-LD19 lidar serial. LD19-style units commonly stream
-// fixed 47-byte frames at 230400 8N1.
+// fixed 47-byte frames at 230400 8N1. The lidar has no serial input: its
+// fourth wire is a PWM speed-control input. Holding that line low keeps the
+// lidar in internal closed-loop control (~10 Hz); drive 20-50 kHz PWM
+// (~40% duty ~= 10 Hz) to take external control of scan RPM.
 constexpr uint8_t kLidarRxPin = D4;
-constexpr uint8_t kLidarTxPin = D5;
+constexpr uint8_t kLidarPwmPin = D3;
 constexpr uint32_t kLidarBaud = 230400;
+constexpr uint32_t kLidarPwmFrequencyHz = 30000;
+constexpr uint8_t kLidarPwmResolutionBits = 10;
+// Camera XCLK owns LEDC channel 0 / timer 0 on the master; use timer 1.
+constexpr uint8_t kLidarPwmChannel = 2;
+// 0 holds the PWM line low: per the LD19 manual, a grounded PWM pin engages
+// internal speed control (~10 Hz). Raise for external RPM control
+// (~40% duty at 30 kHz ~= 10 Hz).
+constexpr uint16_t kLidarPwmDuty = 0;
 
 // Follower I2C bus: TCA9548A mux plus BNO08x on the root bus.
 constexpr uint8_t kI2cSdaPin = D4;

@@ -76,6 +76,7 @@ uint16_t followerTxSeq = 0;
 uint32_t cameraSeq = 0;
 uint32_t lidarFrames = 0;
 uint32_t lidarBadFrames = 0;
+uint32_t lidarBytes = 0;
 uint32_t followerReports = 0;
 uint32_t followerBadPackets = 0;
 uint32_t velocityCommands = 0;
@@ -99,6 +100,7 @@ struct Ld19Reader {
         continue;
       }
       const uint8_t byte = static_cast<uint8_t>(raw);
+      ++lidarBytes;
 
       if (index == 0) {
         if (byte != 0x54) {
@@ -604,17 +606,23 @@ void setup() {
                      SERIAL_8N1,
                      kiwi_config::kFollowerUartRxPin,
                      kiwi_config::kFollowerUartTxPin);
+  // LD19 is transmit-only on serial; no TX pin needed toward the lidar.
   LidarUart.begin(kiwi_config::kLidarBaud,
                   SERIAL_8N1,
                   kiwi_config::kLidarRxPin,
-                  kiwi_config::kLidarTxPin);
+                  -1);
+  ledcSetup(kiwi_config::kLidarPwmChannel,
+            kiwi_config::kLidarPwmFrequencyHz,
+            kiwi_config::kLidarPwmResolutionBits);
+  ledcAttachPin(kiwi_config::kLidarPwmPin, kiwi_config::kLidarPwmChannel);
+  ledcWrite(kiwi_config::kLidarPwmChannel, kiwi_config::kLidarPwmDuty);
   Serial.printf("Follower UART RX=GPIO%u TX=GPIO%u baud=%lu\n",
                 kiwi_config::kFollowerUartRxPin,
                 kiwi_config::kFollowerUartTxPin,
                 static_cast<unsigned long>(kiwi_config::kFollowerUartBaud));
-  Serial.printf("LD19 UART RX=GPIO%u TX=GPIO%u baud=%lu\n",
+  Serial.printf("LD19 UART RX=GPIO%u PWM=GPIO%u baud=%lu\n",
                 kiwi_config::kLidarRxPin,
-                kiwi_config::kLidarTxPin,
+                kiwi_config::kLidarPwmPin,
                 static_cast<unsigned long>(kiwi_config::kLidarBaud));
 
   cameraReady = initCamera();
@@ -638,11 +646,15 @@ void loop() {
   if (nowMs - lastStatusPublishMs >= kiwi_config::kMasterStatusPeriodMs) {
     lastStatusPublishMs = nowMs;
     publishStatus();
-    Serial.printf("master status zenoh=%s wifi=%s lidar=%lu follower=%lu cmd=%lu heap=%lu\n",
+    Serial.printf("master status zenoh=%s wifi=%s lidar=%lu lidar_bytes=%lu lidar_bad=%lu "
+                  "follower=%lu follower_bad=%lu cmd=%lu heap=%lu\n",
                   zenohReady ? "ok" : "off",
                   WiFi.status() == WL_CONNECTED ? "ok" : "off",
                   static_cast<unsigned long>(lidarFrames),
+                  static_cast<unsigned long>(lidarBytes),
+                  static_cast<unsigned long>(lidarBadFrames),
                   static_cast<unsigned long>(followerReports),
+                  static_cast<unsigned long>(followerBadPackets),
                   static_cast<unsigned long>(velocityCommands),
                   static_cast<unsigned long>(ESP.getFreeHeap()));
   }
