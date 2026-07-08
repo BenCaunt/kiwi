@@ -45,16 +45,17 @@ pio run -e follower -t upload
   to start turning while the others move at `1650 us` (~30%). Account for this
   deadband in kinematics tuning.
 
-## Motor -> Encoder Mapping (measured 2026-07-07)
+## Motor -> Encoder Mapping (measured 2026-07-08, post chassis rebuild)
 
 Measured with the `follower_motor_encoder_map` firmware and recorded in
-`include/robot_config.h`:
+`include/robot_config.h`. Re-run the mapping after any chassis or wiring
+rework: the 2026-07-08 rebuild reshuffled all three channels.
 
 | Firmware motor | Pin | Encoder mux channel | Positive command |
 |---|---|---|---|
-| motor 0 | `D0/GPIO1` | ch1 | counts decrease (polarity `-1`) |
-| motor 1 | `D2/GPIO3` | ch0 | counts increase (polarity `+1`) |
-| motor 2 | `D3/GPIO4` | ch2 | counts decrease (polarity `-1`) |
+| motor 0 | `D0/GPIO1` | ch2 | counts decrease (polarity `-1`) |
+| motor 1 | `D2/GPIO3` | ch1 | counts increase (polarity `+1`) |
+| motor 2 | `D3/GPIO4` | ch0 | counts decrease (polarity `-1`) |
 | aux neutral | `D1/GPIO2` | - | second Dominion arming input |
 
 The second Dominion's *driven* input is on `D3`; the input the firmware pins at
@@ -166,7 +167,7 @@ Follower:
 - I2C mux and IMU root bus: SDA `D4`, SCL `D5`
 - motor PWM: `D0`, `D2`, `D3` (aux neutral for the second Dominion: `D1`)
 - BNO08x: INT `D9`, RESET `D8`
-- AS5600 mux channels: `1`, `0`, `2` for motors 0/1/2 (PCA9548A at `0x70`,
+- AS5600 mux channels: `2`, `1`, `0` for motors 0/1/2 (PCA9548A at `0x70`,
   A0/A1/A2 tied to GND)
 
 Cross the UART wires between boards: master TX to follower RX, follower TX to master RX, and common ground.
@@ -187,6 +188,7 @@ Default namespace is `kiwi/xiao`.
 - Verify `kWheelAnglesRad` matches the physical wheel order.
 - `kEncoderPolarity` is measured (2026-07-07); still verify `kMotorPolarity`
   against the kinematic wheel directions with a driving test.
-- Re-seat the ch0 AS5600 magnet: it reports magnet-not-detected (`md=0`) and
-  drops counts under fast motion. All three magnets read on the weak side.
+- All three AS5600 magnets are detected (`md=1`) since the 2026-07-08 chassis
+  rebuild but still read on the weak side (`ml=1`); nudging them closer to the
+  sensors would add margin.
 - Confirm the LD19 variant frame format and baud rate. The parser currently locks to `0x54 0x2c` 47-byte frames and publishes raw frames.

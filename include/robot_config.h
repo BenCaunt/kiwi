@@ -36,10 +36,11 @@ constexpr uint8_t kI2cSclPin = D5;
 constexpr uint32_t kI2cClockHz = 400000;
 constexpr uint8_t kTca9548aAddress = 0x70;
 constexpr uint8_t kAs5600Address = 0x36;
-// Measured 2026-07-06 with the motor_encoder_map test: motor i drives the
-// wheel whose AS5600 sits on mux channel kEncoderTcaChannels[i]. Polarity is
-// chosen so a positive motor command increases the reported count.
-constexpr uint8_t kEncoderTcaChannels[3] = {1, 0, 2};
+// Measured 2026-07-08 with the motor_encoder_map test (post chassis rebuild):
+// motor i drives the wheel whose AS5600 sits on mux channel
+// kEncoderTcaChannels[i]. Polarity is chosen so a positive motor command
+// increases the reported count.
+constexpr uint8_t kEncoderTcaChannels[3] = {2, 1, 0};
 constexpr int8_t kEncoderPolarity[3] = {-1, 1, -1};
 
 // Follower motor outputs (same mapping run): the second Dominion's DRIVEN
