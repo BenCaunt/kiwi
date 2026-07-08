@@ -51,7 +51,6 @@ using kiwi::VelocityMode;
 
 constexpr char kApSsid[] = "KIWI-MASTER";
 constexpr char kApPassword[] = "seeedstudio";
-constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kDriveParamsResendMs = 2000;
 
 // Runtime configuration, provisioned over the soft-AP HTTP endpoint and
@@ -72,6 +71,17 @@ uint32_t driveParamsAckedVersion = 0xffffffff;
 uint32_t lastDriveParamsSendMs = 0;
 bool rebootPending = false;
 uint32_t rebootAtMs = 0;
+constexpr uint32_t kStaRetryMs = 20000;
+constexpr uint32_t kZenohRetryMs = 10000;
+// The soft-AP pins the radio to its channel, which can break STA auth against
+// a router on a different channel (endless AUTH_EXPIRE). So: STA joins first
+// and the AP comes up on the STA's channel; if the join hasn't landed by this
+// deadline, start the AP anyway so provisioning stays reachable.
+constexpr uint32_t kApFallbackMs = 30000;
+bool apStarted = false;
+bool staWasConnected = false;
+uint32_t lastStaAttemptMs = 0;
+uint32_t lastZenohAttemptMs = 0;
 constexpr size_t kCameraHeaderBytes = 32;
 constexpr size_t kLd19FrameBytes = 47;
 
@@ -294,39 +304,49 @@ bool initCamera() {
   return true;
 }
 
-bool connectWifi() {
-  WiFi.persistent(false);
+void startAccessPoint(bool staConnected) {
+  if (apStarted) {
+    return;
+  }
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false);
   WiFi.softAP(kApSsid, kApPassword);
-  Serial.printf("Master AP: %s / %s at %s\n",
+  apStarted = true;
+  Serial.printf("Master AP: %s / %s at %s%s\n",
                 kApSsid,
                 kApPassword,
-                WiFi.softAPIP().toString().c_str());
+                WiFi.softAPIP().toString().c_str(),
+                staConnected ? " (sharing STA channel)" : " (STA not connected)");
+}
+
+void startWifi() {
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
 
   if (strlen(runtimeConfig.wifiSsid) == 0) {
     Serial.println("No Wi-Fi configured; provision over the AP (POST /config) or add secrets.h.");
-    return false;
+    startAccessPoint(false);
+    return;
   }
 
-  Serial.printf("Connecting STA Wi-Fi to %s", runtimeConfig.wifiSsid);
+  WiFi.mode(WIFI_STA);
+
+  // One boot-time scan: proves the target is visible on 2.4 GHz and shows its
+  // auth mode -- the difference between "bad password" and "can't even see it".
+  const int16_t found = WiFi.scanNetworks();
+  for (int16_t i = 0; i < found; ++i) {
+    Serial.printf("  scan: %-32s ch=%2d rssi=%d auth=%d%s\n",
+                  WiFi.SSID(i).c_str(),
+                  WiFi.channel(i),
+                  WiFi.RSSI(i),
+                  static_cast<int>(WiFi.encryptionType(i)),
+                  WiFi.SSID(i) == runtimeConfig.wifiSsid ? "  <-- target" : "");
+  }
+  WiFi.scanDelete();
+
+  Serial.printf("Connecting STA Wi-Fi to %s (retries in the background; AP follows)\n",
+                runtimeConfig.wifiSsid);
   WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
-  const uint32_t startMs = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
-    Serial.print(".");
-    delay(500);
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("STA Wi-Fi timed out, status=%d\n", static_cast<int>(WiFi.status()));
-    return false;
-  }
-
-  Serial.printf("STA Wi-Fi ready: %s RSSI=%d\n",
-                WiFi.localIP().toString().c_str(),
-                WiFi.RSSI());
-  return true;
+  lastStaAttemptMs = millis();
 }
 
 bool publishZenohBytes(z_owned_publisher_t *publisher, const uint8_t *data, size_t len) {
@@ -506,6 +526,7 @@ bool startZenohSession() {
       !declareZenohPublisher(kZenohStatusKey, &statusPub, Z_PRIORITY_INTERACTIVE_LOW) ||
       !declareZenohSubscriber(kZenohCmdVelKey, &cmdVelSub, cmdVelHandler)) {
     Serial.println("Unable to declare one or more Zenoh resources.");
+    z_session_drop(z_session_move(&zenohSession));
     return false;
   }
 
@@ -817,6 +838,49 @@ void handleHttpConfig() {
   }
 }
 
+// Keep the STA link and Zenoh session alive from the main loop: retry the
+// join until it lands (routers can be slow right after a reboot) and
+// re-establish both after any drop.
+void maintainNetwork(uint32_t nowMs) {
+  if (strlen(runtimeConfig.wifiSsid) == 0) {
+    return;
+  }
+
+  const bool staConnected = WiFi.status() == WL_CONNECTED;
+  if (staConnected && !staWasConnected) {
+    Serial.printf("STA Wi-Fi ready: %s RSSI=%d\n",
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
+    lastZenohAttemptMs = nowMs - kZenohRetryMs;  // try Zenoh right away
+  } else if (!staConnected && staWasConnected) {
+    Serial.println("STA Wi-Fi lost; retrying in the background.");
+    zenohReady = false;
+  }
+  staWasConnected = staConnected;
+
+  if (staConnected || nowMs >= kApFallbackMs) {
+    startAccessPoint(staConnected);
+  }
+
+  if (!staConnected) {
+    if (nowMs - lastStaAttemptMs >= kStaRetryMs) {
+      lastStaAttemptMs = nowMs;
+      Serial.printf("Retrying STA Wi-Fi to %s (status=%d)\n",
+                    runtimeConfig.wifiSsid,
+                    static_cast<int>(WiFi.status()));
+      WiFi.disconnect();
+      WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
+    }
+    return;
+  }
+
+  if (!zenohReady && zenohPublishMutex != nullptr &&
+      nowMs - lastZenohAttemptMs >= kZenohRetryMs) {
+    lastZenohAttemptMs = nowMs;
+    zenohReady = startZenohSession();
+  }
+}
+
 void startHttpServer() {
   httpServer.on("/status", HTTP_GET, handleHttpStatus);
   httpServer.on("/config", HTTP_POST, handleHttpConfig);
@@ -869,12 +933,10 @@ void setup() {
                 static_cast<unsigned long>(kiwi_config::kLidarBaud));
 
   cameraReady = initCamera();
-  const bool wifiReady = connectWifi();
+  startWifi();
   startHttpServer();
   zenohPublishMutex = xSemaphoreCreateMutex();
-  if (wifiReady && zenohPublishMutex != nullptr) {
-    zenohReady = startZenohSession();
-  }
+  // Zenoh starts from maintainNetwork() once the STA link is up.
 }
 
 void loop() {
@@ -883,6 +945,8 @@ void loop() {
   httpServer.handleClient();
 
   const uint32_t nowMs = millis();
+  maintainNetwork(nowMs);
+
   if (driveParamsAckedVersion != runtimeConfig.drive.version &&
       nowMs - lastDriveParamsSendMs >= kDriveParamsResendMs) {
     lastDriveParamsSendMs = nowMs;
