@@ -147,13 +147,18 @@ network. Settings persist in the master's NVS; drive parameters are forwarded
 to the follower over UART (`DriveParams` packet + ack) and persist in the
 follower's NVS. Compiled constants are first-boot defaults only.
 
-New network / travel workflow:
+New network / travel workflow -- one command, run from the network the robot
+should join (NOT from the robot AP):
 
-1. While on the target network, note your laptop IP (`ipconfig getifaddr en0`).
-2. Join `KIWI-MASTER`, then:
-   `python3 scripts/kiwi_provision.py --ssid MyNet --password secret --pc-ip 192.168.8.42`
-3. The robot saves, reboots, joins the network; the script prints its new IP.
-4. Rejoin your network and run `zenohd --listen tcp/0.0.0.0:7447`.
+```sh
+python3 scripts/kiwi_provision.py --password <wifi-password>
+```
+
+The script detects your current SSID and laptop IP, switches this Mac onto
+`KIWI-MASTER`, uploads the config, waits for the robot to join your network,
+switches your Mac back, and verifies the robot is reachable at its new IP.
+Pass `--ssid`/`--pc-ip` to override the detected values, then run
+`zenohd --listen tcp/0.0.0.0:7447`.
 
 Calibration while the robot is on your network (applies live, no reboot):
 

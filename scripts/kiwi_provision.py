@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """Provision the kiwi master over its soft-AP -- no reflash, no USB.
 
-The master always serves HTTP on http://192.168.4.1/ from the KIWI-MASTER
-AP (password: seeedstudio), and on its station IP once it has joined a
-network. Settings are persisted to NVS on the robot; compiled defaults are
-first-boot values only. Drive parameters are forwarded to the follower over
-UART and persist there too.
+Run this from your NORMAL WiFi network (the one the robot should join). The
+script auto-detects your laptop IP and current SSID, switches this Mac onto
+the KIWI-MASTER AP, uploads the config, waits for the robot to join your
+network, prints the robot's new IP, and switches your WiFi back.
 
-Typical travel workflow (new network, new laptop IP):
-  1. Note your laptop's IP on the target network (e.g. `ipconfig getifaddr en0`
-     while connected to the hotel/home WiFi).
-  2. Join the KIWI-MASTER WiFi network.
-  3. python3 scripts/kiwi_provision.py --ssid MyNet --password hunter2 --pc-ip 192.168.8.42
-  4. Rejoin your normal network; the script printed the robot's new IP.
-  5. zenohd --listen tcp/0.0.0.0:7447
+One command on a new network:
+  python3 scripts/kiwi_provision.py --password <wifi-password>
+(--ssid defaults to the network you are currently on, --pc-ip to your
+current IP.)
 
-Calibration workflow (robot already on your network):
-  python3 scripts/kiwi_provision.py --host <robot-sta-ip> --wheel-radius 0.024
+Calibration once the robot is on your network (no AP dance, applies live):
+  python3 scripts/kiwi_provision.py --host <robot-ip> --wheel-radius 0.024
+  python3 scripts/kiwi_provision.py --host <robot-ip> --status
 
-Status check:
-  python3 scripts/kiwi_provision.py --status
+The master serves HTTP on http://192.168.4.1/ from the KIWI-MASTER AP
+(password: seeedstudio) and on its station IP once connected. Settings
+persist in NVS on the robot; drive parameters are forwarded to the follower
+over UART and persist there too.
 """
 
 import argparse
@@ -30,8 +29,14 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_HOST = "192.168.4.1"
+AP_SSID = "KIWI-MASTER"
+AP_PASSWORD = "seeedstudio"
+AP_HOST = "192.168.4.1"
 AP_SUBNET_PREFIX = "192.168.4."
+
+
+def run(cmd, timeout=15):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def http_json(method, url, body=None, timeout=5):
@@ -43,34 +48,69 @@ def http_json(method, url, body=None, timeout=5):
         return json.loads(resp.read().decode())
 
 
-def detect_lan_ip():
-    """Best-effort detection of this machine's LAN IP (macOS-first)."""
-    try:
-        route = subprocess.run(
-            ["route", "-n", "get", "default"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-        iface = next(
-            (line.split(":", 1)[1].strip() for line in route.splitlines()
-             if "interface:" in line),
-            None,
-        )
-        candidates = [iface] if iface else []
-    except (OSError, subprocess.SubprocessError):
-        candidates = []
-    candidates += ["en0", "en1"]
+def wifi_device():
+    out = run(["networksetup", "-listallhardwareports"]).stdout
+    port = None
+    for line in out.splitlines():
+        if line.startswith("Hardware Port:"):
+            port = line.split(":", 1)[1].strip()
+        elif line.startswith("Device:") and port in ("Wi-Fi", "AirPort"):
+            return line.split(":", 1)[1].strip()
+    return "en0"
 
-    for candidate in candidates:
-        try:
-            ip = subprocess.run(
-                ["ipconfig", "getifaddr", candidate],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if ip:
-            return ip
+
+def current_ssid(device):
+    out = run(["networksetup", "-getairportnetwork", device]).stdout
+    if ":" in out and "not associated" not in out.lower():
+        ssid = out.split(":", 1)[1].strip()
+        if ssid:
+            return ssid
+    # networksetup is unreliable on recent macOS; ipconfig still knows.
+    out = run(["ipconfig", "getsummary", device]).stdout
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SSID") and ":" in stripped:
+            ssid = stripped.split(":", 1)[1].strip()
+            if ssid and ssid != "<redacted>":
+                return ssid
     return None
+
+
+def interface_ip(device):
+    ip = run(["ipconfig", "getifaddr", device]).stdout.strip()
+    return ip or None
+
+
+def join_wifi(device, ssid, password, timeout_s=30):
+    print(f"Switching {device} to '{ssid}'...")
+    cmd = ["networksetup", "-setairportnetwork", device, ssid]
+    if password:
+        cmd.append(password)
+    result = run(cmd, timeout=timeout_s)
+    failure = (result.stdout + result.stderr).strip()
+    if "Failed" in failure or "Error" in failure:
+        return False, failure
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if interface_ip(device):
+            return True, None
+        time.sleep(1)
+    return False, "no IP address acquired"
+
+
+def wait_for_ap_status(timeout_s, want_sta=False):
+    """Poll /status over the AP; optionally hold out for sta_connected."""
+    deadline = time.time() + timeout_s
+    last = None
+    while time.time() < deadline:
+        try:
+            last = http_json("GET", f"http://{AP_HOST}/status", timeout=3)
+            if not want_sta or last.get("sta_connected"):
+                return last
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(2)
+    return last
 
 
 def build_config(args):
@@ -101,30 +141,45 @@ def build_config(args):
     return config
 
 
+def post_config(host, config):
+    redacted = {k: ("***" if k == "wifi_password" else v) for k, v in config.items()}
+    print(f"POST http://{host}/config: {json.dumps(redacted)}")
+    result = http_json("POST", f"http://{host}/config", config, timeout=8)
+    print(f"Robot response: {json.dumps(result)}")
+    if not result.get("ok"):
+        sys.exit(1)
+    return result
+
+
 def print_status(status):
+    if status is None:
+        print("No status available.")
+        return
     print(json.dumps(status, indent=2))
     if status.get("sta_connected"):
         sta_ip = status.get("sta_ip")
         print(f"\nRobot is on '{status.get('wifi_ssid')}' at {sta_ip}")
-        print(f"Reprovision later without the AP: --host {sta_ip}")
+        print(f"Reprovision/calibrate without the AP: --host {sta_ip}")
     else:
         print("\nRobot STA is NOT connected; it is reachable only on the AP.")
     if status.get("zenoh_connect"):
-        print(f"Run the router on your laptop: zenohd --listen tcp/0.0.0.0:"
-              f"{status['zenoh_connect'].rsplit(':', 1)[-1]}")
+        port = status["zenoh_connect"].rsplit(":", 1)[-1]
+        print(f"Run the router on your laptop: zenohd --listen tcp/0.0.0.0:{port}")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=DEFAULT_HOST,
-                        help=f"robot address (default {DEFAULT_HOST} via the KIWI-MASTER AP)")
+    parser.add_argument("--host",
+                        help="robot address; skips the WiFi dance and talks directly "
+                        "(use the robot's STA IP, or 192.168.4.1 if already on the AP)")
     parser.add_argument("--status", action="store_true",
-                        help="print robot status and exit")
-    parser.add_argument("--ssid", help="WiFi network the robot should join")
-    parser.add_argument("--password", help="WiFi password")
+                        help="print robot status and exit (requires --host or the AP)")
+    parser.add_argument("--ssid", help="WiFi the robot should join "
+                        "(default: the network this Mac is on right now)")
+    parser.add_argument("--password", help="WiFi password for --ssid")
     parser.add_argument("--pc-ip", help="this laptop's IP on the target network "
-                        "(builds zenoh_connect; auto-detected only when not on the robot AP)")
+                        "(default: auto-detected before switching to the AP)")
     parser.add_argument("--zenoh-port", type=int, default=7447)
     parser.add_argument("--zenoh-connect",
                         help="full zenoh locator, overrides --pc-ip (e.g. tcp/192.168.8.42:7447)")
@@ -136,58 +191,106 @@ def main():
     parser.add_argument("--motor-polarity", help="three comma-separated 1/-1, e.g. '1,-1,1'")
     args = parser.parse_args()
 
-    base = f"http://{args.host}"
-
-    if args.status:
-        print_status(http_json("GET", f"{base}/status"))
+    # Direct mode: talk to the given host, no WiFi switching.
+    if args.host:
+        if args.status:
+            print_status(http_json("GET", f"http://{args.host}/status"))
+            return
+        config = build_config(args)
+        if not config:
+            parser.error("nothing to configure; pass --status or at least one setting")
+        result = post_config(args.host, config)
+        if result.get("reboot"):
+            print("Robot is rebooting to apply network settings.")
+        else:
+            print_status(http_json("GET", f"http://{args.host}/status"))
         return
 
-    if args.ssid is not None and args.password is None:
+    device = wifi_device()
+    ip = interface_ip(device)
+    ssid = current_ssid(device)
+    on_ap = ssid == AP_SSID or (ip or "").startswith(AP_SUBNET_PREFIX)
+
+    if args.status:
+        if not on_ap:
+            ok, err = join_wifi(device, AP_SSID, AP_PASSWORD)
+            if not ok:
+                sys.exit(f"Could not join {AP_SSID}: {err}")
+        try:
+            print_status(wait_for_ap_status(20))
+        finally:
+            if not on_ap and ssid:
+                join_wifi(device, ssid, None)
+        return
+
+    if on_ap:
+        sys.exit(
+            f"You are on {AP_SSID}. Run this from the network the robot should join\n"
+            "so your laptop IP can be detected, or pass --host 192.168.4.1 with\n"
+            "explicit --ssid/--password/--pc-ip values."
+        )
+
+    # Fill in defaults from the network we are on right now.
+    if args.ssid is None:
+        if args.password is None and not build_config(args):
+            parser.error("nothing to configure; pass --status or at least one setting")
+        if args.password is not None:
+            if ssid is None:
+                sys.exit("Could not detect the current SSID; pass --ssid explicitly.")
+            args.ssid = ssid
+            print(f"Using current network as target: '{ssid}'")
+    elif args.password is None:
         sys.exit("--ssid requires --password (use --password '' for an open network)")
 
-    # A new network almost always means a new laptop IP: if WiFi is being set
-    # and no zenoh endpoint was given, derive it, but never from the robot's
-    # own AP subnet -- that address is useless on the target network.
-    if args.ssid is not None and args.pc_ip is None and args.zenoh_connect is None:
-        detected = detect_lan_ip()
-        if detected is None or detected.startswith(AP_SUBNET_PREFIX):
-            sys.exit(
-                "Cannot auto-detect your IP on the target network (you are on the robot AP).\n"
-                "Check it while connected to that network (ipconfig getifaddr en0), then\n"
-                "re-run with --pc-ip <ip>, or pass --zenoh-connect explicitly."
-            )
-        args.pc_ip = detected
-        print(f"Auto-detected laptop IP {detected}; zenoh_connect=tcp/{detected}:{args.zenoh_port}")
+    if args.pc_ip is None and args.zenoh_connect is None:
+        if ip is None:
+            sys.exit("Could not detect this Mac's IP; pass --pc-ip explicitly.")
+        args.pc_ip = ip
+        print(f"Using laptop IP {ip}: zenoh_connect=tcp/{ip}:{args.zenoh_port}")
 
     config = build_config(args)
     if not config:
         parser.error("nothing to configure; pass --status or at least one setting")
 
-    print(f"POST {base}/config: "
-          f"{json.dumps({k: ('***' if k == 'wifi_password' else v) for k, v in config.items()})}")
-    result = http_json("POST", f"{base}/config", config)
-    print(f"Robot response: {json.dumps(result)}")
-    if not result.get("ok"):
+    ok, err = join_wifi(device, AP_SSID, AP_PASSWORD)
+    if not ok:
+        sys.exit(f"Could not join {AP_SSID}: {err}\nIs the robot powered on?")
+
+    status = None
+    try:
+        result = post_config(AP_HOST, config)
+        if result.get("reboot"):
+            print("Robot is rebooting to join the network; waiting on the AP...")
+            time.sleep(8)
+            # The AP drops during reboot; macOS may wander off it. Re-join.
+            join_wifi(device, AP_SSID, AP_PASSWORD)
+            status = wait_for_ap_status(60, want_sta=True)
+        else:
+            status = wait_for_ap_status(15)
+    finally:
+        if ssid:
+            print(f"Switching {device} back to '{ssid}'...")
+            join_wifi(device, ssid, None)
+
+    print()
+    print_status(status)
+    if status and not status.get("sta_connected"):
+        print("\nThe robot did not report joining the network -- check the SSID/password\n"
+              "and re-run, or watch its USB serial output.")
         sys.exit(1)
 
-    if not result.get("reboot"):
-        print_status(http_json("GET", f"{base}/status"))
-        return
-
-    print("Robot is rebooting to join the network; polling for it to come back...")
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        time.sleep(3)
-        try:
-            status = http_json("GET", f"{base}/status", timeout=3)
-        except (urllib.error.URLError, OSError):
-            continue
-        if status.get("sta_connected") or time.time() > deadline - 15:
-            print_status(status)
-            return
-    print("Robot did not come back within 60 s. If your laptop dropped off the AP,\n"
-          "rejoin KIWI-MASTER and run --status, or find the robot on the target network.")
-    sys.exit(1)
+    # Final proof from the target network: reach the robot on its STA IP.
+    sta_ip = status.get("sta_ip") if status else None
+    if sta_ip:
+        for _ in range(10):
+            try:
+                http_json("GET", f"http://{sta_ip}/status", timeout=3)
+                print(f"Verified: robot reachable at http://{sta_ip}/ from this network.")
+                return
+            except (urllib.error.URLError, OSError):
+                time.sleep(2)
+        print(f"Robot claims {sta_ip} but is not reachable from here yet; "
+              "give it a moment or check that both are on the same network.")
 
 
 if __name__ == "__main__":
