@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
 #include <Wire.h>
 #include <esp_timer.h>
@@ -12,6 +13,8 @@
 
 namespace {
 
+using kiwi::DriveParamsAckPayload;
+using kiwi::DriveParamsPayload;
 using kiwi::MessageType;
 using kiwi::Packet;
 using kiwi::PacketReader;
@@ -40,6 +43,11 @@ struct EncoderState {
 };
 
 EncoderState encoders[3];
+// Runtime drive parameters. Compiled robot_config.h values are first-boot
+// defaults; the master can update these over UART and they persist in NVS.
+DriveParamsPayload driveParams = {};
+uint32_t persistedDriveParamsVersion = 0;
+Preferences configPrefs;
 VelocityCommandPayload activeCommand = {};
 uint32_t lastCommandMs = 0;
 bool commandActive = false;
@@ -53,6 +61,45 @@ uint32_t badPackets = 0;
 uint32_t lastEncoderSampleMs = 0;
 uint32_t lastReportMs = 0;
 uint32_t lastSerialStatusMs = 0;
+
+void loadDriveParams() {
+  driveParams.version = 0;
+  driveParams.wheel_radius_m = kiwi_config::kWheelRadiusM;
+  driveParams.drive_base_radius_m = kiwi_config::kDriveBaseRadiusM;
+  driveParams.max_wheel_surface_speed_mps = kiwi_config::kMaxWheelSurfaceSpeedMps;
+  for (uint8_t i = 0; i < 3; ++i) {
+    driveParams.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
+  }
+  driveParams.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
+
+  configPrefs.begin("kiwi", true);
+  DriveParamsPayload stored = {};
+  const size_t len = configPrefs.getBytes("drive", &stored, sizeof(stored));
+  configPrefs.end();
+  if (len == sizeof(stored) && driveParamsValid(stored)) {
+    driveParams = stored;
+    persistedDriveParamsVersion = stored.version;
+    Serial.printf("Drive params loaded from NVS, version=%lu\n",
+                  static_cast<unsigned long>(stored.version));
+  } else {
+    Serial.println("Drive params: using compiled defaults (no valid NVS entry).");
+  }
+  Serial.printf("Drive params: wheel_r=%.4f base_r=%.4f max_v=%.2f pol=%d/%d/%d timeout=%u\n",
+                driveParams.wheel_radius_m,
+                driveParams.drive_base_radius_m,
+                driveParams.max_wheel_surface_speed_mps,
+                driveParams.motor_polarity[0],
+                driveParams.motor_polarity[1],
+                driveParams.motor_polarity[2],
+                driveParams.velocity_command_timeout_ms);
+}
+
+void persistDriveParams() {
+  configPrefs.begin("kiwi", false);
+  configPrefs.putBytes("drive", &driveParams, sizeof(driveParams));
+  configPrefs.end();
+  persistedDriveParamsVersion = driveParams.version;
+}
 
 uint32_t pulseUsToDuty(uint16_t pulseUs) {
   const uint32_t maxDuty = (1UL << kiwi_config::kEscPwmResolutionBits) - 1;
@@ -74,7 +121,7 @@ void setMotorPercent(uint8_t index, float percent) {
   if (index >= 3) {
     return;
   }
-  percent *= kiwi_config::kMotorPolarity[index] >= 0 ? 1.0f : -1.0f;
+  percent *= driveParams.motor_polarity[index] >= 0 ? 1.0f : -1.0f;
   const uint16_t pulseUs = motorPercentToPulseUs(percent);
   ledcWrite(kiwi_config::kMotorPwmChannels[index], pulseUsToDuty(pulseUs));
 }
@@ -211,7 +258,7 @@ void updateEncoders() {
     const uint32_t dtUs = nowUs - encoder.updatedUs;
     if (dtUs > 0) {
       const float deltaRad = (static_cast<float>(delta) * kTwoPi) / kAs5600CountsPerRev;
-      encoder.wheelSpeedMps = (deltaRad * kiwi_config::kWheelRadiusM) / (static_cast<float>(dtUs) * 1.0e-6f);
+      encoder.wheelSpeedMps = (deltaRad * driveParams.wheel_radius_m) / (static_cast<float>(dtUs) * 1.0e-6f);
     }
     encoder.count += delta;
     encoder.raw = raw;
@@ -236,7 +283,7 @@ void wheelSpeedsFromTwist(float vx, float vy, float omega, float *wheelMps) {
   for (uint8_t i = 0; i < 3; ++i) {
     const float theta = kiwi_config::kWheelAnglesRad[i];
     wheelMps[i] = (-sinf(theta) * vx) + (cosf(theta) * vy) +
-                  (kiwi_config::kDriveBaseRadiusM * omega);
+                  (driveParams.drive_base_radius_m * omega);
   }
 }
 
@@ -252,7 +299,7 @@ void twistFromWheelSpeeds(const float *wheelMps, float *vx, float *vy, float *om
   }
   *vx = (2.0f / 3.0f) * sumVx;
   *vy = (2.0f / 3.0f) * sumVy;
-  *omega = sumOmega / (3.0f * kiwi_config::kDriveBaseRadiusM);
+  *omega = sumOmega / (3.0f * driveParams.drive_base_radius_m);
 }
 
 void applyActiveCommand() {
@@ -274,7 +321,7 @@ void applyActiveCommand() {
                        activeCommand.omega_radps,
                        wheelMps);
   for (uint8_t i = 0; i < 3; ++i) {
-    const float percent = (wheelMps[i] / kiwi_config::kMaxWheelSurfaceSpeedMps) * 100.0f;
+    const float percent = (wheelMps[i] / driveParams.max_wheel_surface_speed_mps) * 100.0f;
     setMotorPercent(i, percent);
   }
 }
@@ -363,7 +410,7 @@ void handleVelocityCommand(const Packet &packet) {
   }
 
   if (activeCommand.timeout_ms == 0) {
-    activeCommand.timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
+    activeCommand.timeout_ms = driveParams.velocity_command_timeout_ms;
   }
   lastCommandMs = millis();
   commandActive = activeCommand.mode != static_cast<uint8_t>(VelocityMode::Stop);
@@ -371,11 +418,47 @@ void handleVelocityCommand(const Packet &packet) {
   applyActiveCommand();
 }
 
+void sendDriveParamsAck() {
+  DriveParamsAckPayload ack = {};
+  ack.version = driveParams.version;
+  kiwi::writePacket(MasterUart,
+                    MessageType::DriveParamsAck,
+                    reportTxSeq++,
+                    &ack,
+                    sizeof(ack));
+}
+
+void handleDriveParams(const Packet &packet) {
+  if (packet.payloadLength != sizeof(DriveParamsPayload)) {
+    ++badPackets;
+    return;
+  }
+
+  DriveParamsPayload incoming = {};
+  memcpy(&incoming, packet.payload, sizeof(incoming));
+  if (!driveParamsValid(incoming)) {
+    ++badPackets;
+    // Ack the currently active version so the master sees the rejection.
+    sendDriveParamsAck();
+    return;
+  }
+
+  driveParams = incoming;
+  if (driveParams.version != persistedDriveParamsVersion) {
+    persistDriveParams();
+    Serial.printf("Drive params updated + persisted, version=%lu\n",
+                  static_cast<unsigned long>(driveParams.version));
+  }
+  sendDriveParamsAck();
+}
+
 void processMasterUart() {
   Packet packet;
   while (masterReader.readFrom(MasterUart, packet)) {
     if (packet.type == MessageType::VelocityCommand) {
       handleVelocityCommand(packet);
+    } else if (packet.type == MessageType::DriveParams) {
+      handleDriveParams(packet);
     } else {
       ++badPackets;
     }
@@ -446,6 +529,8 @@ void setup() {
                 kiwi_config::kFollowerUartTxPin,
                 static_cast<unsigned long>(kiwi_config::kFollowerUartBaud));
 
+  loadDriveParams();
+
   Wire.begin(kiwi_config::kI2cSdaPin, kiwi_config::kI2cSclPin);
   Wire.setClock(kiwi_config::kI2cClockHz);
   Wire.setTimeOut(50);
@@ -475,11 +560,12 @@ void loop() {
 
   if (nowMs - lastSerialStatusMs >= 1000) {
     lastSerialStatusMs = nowMs;
-    Serial.printf("follower status cmd=%lu bad=%lu enc_mask=0x%02x imu=%s counts=%lld/%lld/%lld enc_err=%lu/%lu/%lu heap=%lu\n",
+    Serial.printf("follower status cmd=%lu bad=%lu enc_mask=0x%02x imu=%s dpv=%lu counts=%lld/%lld/%lld enc_err=%lu/%lu/%lu heap=%lu\n",
                   static_cast<unsigned long>(commandsReceived),
                   static_cast<unsigned long>(badPackets),
                   encoderReadyMask(),
                   imuReady ? "ok" : "off",
+                  static_cast<unsigned long>(driveParams.version),
                   static_cast<long long>(encoders[0].count),
                   static_cast<long long>(encoders[1].count),
                   static_cast<long long>(encoders[2].count),

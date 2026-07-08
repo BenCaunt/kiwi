@@ -139,16 +139,45 @@ To check connected boards against the inventory:
 ~/.platformio/penv/bin/python scripts/detect_board.py
 ```
 
-## Local Config
+## Provisioning (runtime config, no reflash)
 
-Copy these files before flashing the master:
+The master always serves HTTP on `http://192.168.4.1/` from the `KIWI-MASTER`
+soft-AP (password `seeedstudio`), and on its station IP once it has joined a
+network. Settings persist in the master's NVS; drive parameters are forwarded
+to the follower over UART (`DriveParams` packet + ack) and persist in the
+follower's NVS. Compiled constants are first-boot defaults only.
+
+New network / travel workflow:
+
+1. While on the target network, note your laptop IP (`ipconfig getifaddr en0`).
+2. Join `KIWI-MASTER`, then:
+   `python3 scripts/kiwi_provision.py --ssid MyNet --password secret --pc-ip 192.168.8.42`
+3. The robot saves, reboots, joins the network; the script prints its new IP.
+4. Rejoin your network and run `zenohd --listen tcp/0.0.0.0:7447`.
+
+Calibration while the robot is on your network (applies live, no reboot):
+
+```sh
+python3 scripts/kiwi_provision.py --host <robot-sta-ip> --wheel-radius 0.024
+python3 scripts/kiwi_provision.py --host <robot-sta-ip> --status
+```
+
+Runtime-tunable keys: `wifi_ssid`, `wifi_password`, `zenoh_connect`,
+`zenoh_mode`, `wheel_radius_m`, `drive_base_radius_m`,
+`max_wheel_surface_speed_mps`, `motor_polarity`, `velocity_command_timeout_ms`.
+
+## Local Config (first-boot defaults, optional)
+
+Compiled defaults can be baked in before the first flash so the robot comes up
+on a known network without provisioning:
 
 ```sh
 cp include/secrets.example.h include/secrets.h
 cp include/local_zenoh.example.h include/local_zenoh.h
 ```
 
-Then edit Wi-Fi, Zenoh connect string, and `ROBOT_NAMESPACE`.
+Then edit Wi-Fi, Zenoh connect string, and `ROBOT_NAMESPACE`. NVS-provisioned
+values always win over these once set.
 
 ## Current Pin Assumptions
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,6 +10,8 @@ enum class MessageType : uint8_t {
   VelocityCommand = 1,
   TwistReport = 2,
   Heartbeat = 3,
+  DriveParams = 4,
+  DriveParamsAck = 5,
 };
 
 enum class VelocityMode : uint8_t {
@@ -43,7 +46,55 @@ struct __attribute__((packed)) TwistReportPayload {
   uint16_t status_flags;
 };
 
+// Runtime-tunable drive parameters, master -> follower. The follower applies
+// them immediately, persists them to NVS, and replies with DriveParamsAck.
+// Compiled robot_config.h values are first-boot defaults only. The master
+// resends until the acked version matches its stored version.
+struct __attribute__((packed)) DriveParamsPayload {
+  uint32_t version;
+  float wheel_radius_m;
+  float drive_base_radius_m;
+  float max_wheel_surface_speed_mps;
+  int8_t motor_polarity[3];
+  uint8_t reserved;
+  uint16_t velocity_command_timeout_ms;
+  uint16_t reserved2;
+};
+
+struct __attribute__((packed)) DriveParamsAckPayload {
+  uint32_t version;
+};
+
 static_assert(sizeof(VelocityCommandPayload) == 24, "Unexpected velocity command size");
 static_assert(sizeof(TwistReportPayload) == 88, "Unexpected twist report size");
+static_assert(sizeof(DriveParamsPayload) == 24, "Unexpected drive params size");
+static_assert(sizeof(DriveParamsAckPayload) == 4, "Unexpected drive params ack size");
+
+// Shared sanity bounds so master and follower reject the same nonsense.
+inline bool driveParamsValid(const DriveParamsPayload &params) {
+  if (!isfinite(params.wheel_radius_m) ||
+      params.wheel_radius_m <= 0.001f || params.wheel_radius_m > 0.5f) {
+    return false;
+  }
+  if (!isfinite(params.drive_base_radius_m) ||
+      params.drive_base_radius_m <= 0.01f || params.drive_base_radius_m > 1.0f) {
+    return false;
+  }
+  if (!isfinite(params.max_wheel_surface_speed_mps) ||
+      params.max_wheel_surface_speed_mps <= 0.05f ||
+      params.max_wheel_surface_speed_mps > 10.0f) {
+    return false;
+  }
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (params.motor_polarity[i] != 1 && params.motor_polarity[i] != -1) {
+      return false;
+    }
+  }
+  if (params.velocity_command_timeout_ms < 20 ||
+      params.velocity_command_timeout_ms > 10000) {
+    return false;
+  }
+  return true;
+}
 
 }  // namespace kiwi

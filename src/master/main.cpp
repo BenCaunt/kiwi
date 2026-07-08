@@ -1,4 +1,7 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <esp_camera.h>
 #include <esp_timer.h>
@@ -49,6 +52,26 @@ using kiwi::VelocityMode;
 constexpr char kApSsid[] = "KIWI-MASTER";
 constexpr char kApPassword[] = "seeedstudio";
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kDriveParamsResendMs = 2000;
+
+// Runtime configuration, provisioned over the soft-AP HTTP endpoint and
+// persisted in NVS. Compiled secrets.h/local_zenoh.h/robot_config.h values
+// are first-boot defaults only.
+struct RuntimeConfig {
+  char wifiSsid[33];
+  char wifiPassword[65];
+  char zenohMode[8];
+  char zenohConnect[96];
+  kiwi::DriveParamsPayload drive;
+};
+
+RuntimeConfig runtimeConfig;
+Preferences configPrefs;
+WebServer httpServer(80);
+uint32_t driveParamsAckedVersion = 0xffffffff;
+uint32_t lastDriveParamsSendMs = 0;
+bool rebootPending = false;
+uint32_t rebootAtMs = 0;
 constexpr size_t kCameraHeaderBytes = 32;
 constexpr size_t kLd19FrameBytes = 47;
 
@@ -148,6 +171,65 @@ void writeLe64(uint8_t *dst, uint64_t value) {
   }
 }
 
+void loadRuntimeConfig() {
+  strlcpy(runtimeConfig.wifiSsid, WIFI_SSID, sizeof(runtimeConfig.wifiSsid));
+  strlcpy(runtimeConfig.wifiPassword, WIFI_PASSWORD, sizeof(runtimeConfig.wifiPassword));
+  strlcpy(runtimeConfig.zenohMode, ZENOH_MODE, sizeof(runtimeConfig.zenohMode));
+  strlcpy(runtimeConfig.zenohConnect, ZENOH_CONNECT, sizeof(runtimeConfig.zenohConnect));
+  runtimeConfig.drive.version = 0;
+  runtimeConfig.drive.wheel_radius_m = kiwi_config::kWheelRadiusM;
+  runtimeConfig.drive.drive_base_radius_m = kiwi_config::kDriveBaseRadiusM;
+  runtimeConfig.drive.max_wheel_surface_speed_mps = kiwi_config::kMaxWheelSurfaceSpeedMps;
+  for (uint8_t i = 0; i < 3; ++i) {
+    runtimeConfig.drive.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
+  }
+  runtimeConfig.drive.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
+
+  configPrefs.begin("kiwi", true);
+  if (configPrefs.isKey("ssid")) {
+    configPrefs.getString("ssid", runtimeConfig.wifiSsid, sizeof(runtimeConfig.wifiSsid));
+  }
+  if (configPrefs.isKey("pass")) {
+    configPrefs.getString("pass", runtimeConfig.wifiPassword, sizeof(runtimeConfig.wifiPassword));
+  }
+  if (configPrefs.isKey("zmode")) {
+    configPrefs.getString("zmode", runtimeConfig.zenohMode, sizeof(runtimeConfig.zenohMode));
+  }
+  if (configPrefs.isKey("zconn")) {
+    configPrefs.getString("zconn", runtimeConfig.zenohConnect, sizeof(runtimeConfig.zenohConnect));
+  }
+  kiwi::DriveParamsPayload stored = {};
+  if (configPrefs.getBytes("drive", &stored, sizeof(stored)) == sizeof(stored) &&
+      kiwi::driveParamsValid(stored)) {
+    runtimeConfig.drive = stored;
+  }
+  configPrefs.end();
+
+  Serial.printf("Runtime config: ssid=%s zenoh=%s@%s drive_version=%lu\n",
+                strlen(runtimeConfig.wifiSsid) > 0 ? runtimeConfig.wifiSsid : "(unset)",
+                runtimeConfig.zenohMode,
+                strlen(runtimeConfig.zenohConnect) > 0 ? runtimeConfig.zenohConnect : "(scout)",
+                static_cast<unsigned long>(runtimeConfig.drive.version));
+}
+
+void saveRuntimeConfig() {
+  configPrefs.begin("kiwi", false);
+  configPrefs.putString("ssid", runtimeConfig.wifiSsid);
+  configPrefs.putString("pass", runtimeConfig.wifiPassword);
+  configPrefs.putString("zmode", runtimeConfig.zenohMode);
+  configPrefs.putString("zconn", runtimeConfig.zenohConnect);
+  configPrefs.putBytes("drive", &runtimeConfig.drive, sizeof(runtimeConfig.drive));
+  configPrefs.end();
+}
+
+void sendDriveParamsToFollower() {
+  kiwi::writePacket(FollowerUart,
+                    MessageType::DriveParams,
+                    followerTxSeq++,
+                    &runtimeConfig.drive,
+                    sizeof(runtimeConfig.drive));
+}
+
 camera_config_t makeCameraConfig() {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -222,13 +304,13 @@ bool connectWifi() {
                 kApPassword,
                 WiFi.softAPIP().toString().c_str());
 
-  if (strlen(WIFI_SSID) == 0) {
-    Serial.println("No WIFI_SSID configured; Zenoh will stay disabled until secrets.h is added.");
+  if (strlen(runtimeConfig.wifiSsid) == 0) {
+    Serial.println("No Wi-Fi configured; provision over the AP (POST /config) or add secrets.h.");
     return false;
   }
 
-  Serial.printf("Connecting STA Wi-Fi to %s", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.printf("Connecting STA Wi-Fi to %s", runtimeConfig.wifiSsid);
+  WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
   const uint32_t startMs = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
     Serial.print(".");
@@ -405,14 +487,14 @@ void cmdVelHandler(z_loaned_sample_t *sample, void *arg) {
 bool startZenohSession() {
   z_owned_config_t config;
   z_config_default(&config);
-  zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, ZENOH_MODE);
-  if (strlen(ZENOH_CONNECT) > 0) {
-    zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, ZENOH_CONNECT);
+  zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, runtimeConfig.zenohMode);
+  if (strlen(runtimeConfig.zenohConnect) > 0) {
+    zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, runtimeConfig.zenohConnect);
   }
 
   Serial.printf("Opening Zenoh session mode=%s connect=%s\n",
-                ZENOH_MODE,
-                strlen(ZENOH_CONNECT) > 0 ? ZENOH_CONNECT : "(default)");
+                runtimeConfig.zenohMode,
+                strlen(runtimeConfig.zenohConnect) > 0 ? runtimeConfig.zenohConnect : "(default)");
   if (z_open(&zenohSession, z_config_move(&config), NULL) < 0) {
     Serial.println("Unable to open Zenoh session.");
     return false;
@@ -572,17 +654,176 @@ void publishStatus() {
 void processFollowerUart() {
   Packet packet;
   while (followerReader.readFrom(FollowerUart, packet)) {
-    if (packet.type != MessageType::TwistReport ||
-        packet.payloadLength != sizeof(TwistReportPayload)) {
+    if (packet.type == MessageType::TwistReport &&
+        packet.payloadLength == sizeof(TwistReportPayload)) {
+      TwistReportPayload report = {};
+      memcpy(&report, packet.payload, sizeof(report));
+      ++followerReports;
+      publishTwistReport(report);
+    } else if (packet.type == MessageType::DriveParamsAck &&
+               packet.payloadLength == sizeof(kiwi::DriveParamsAckPayload)) {
+      kiwi::DriveParamsAckPayload ack = {};
+      memcpy(&ack, packet.payload, sizeof(ack));
+      if (ack.version != driveParamsAckedVersion) {
+        Serial.printf("Follower acked drive params version=%lu\n",
+                      static_cast<unsigned long>(ack.version));
+      }
+      driveParamsAckedVersion = ack.version;
+    } else {
       ++followerBadPackets;
-      continue;
     }
-
-    TwistReportPayload report = {};
-    memcpy(&report, packet.payload, sizeof(report));
-    ++followerReports;
-    publishTwistReport(report);
   }
+}
+
+void handleHttpStatus() {
+  JsonDocument doc;
+  doc["ap_ip"] = WiFi.softAPIP().toString();
+  doc["sta_connected"] = WiFi.status() == WL_CONNECTED;
+  doc["sta_ip"] = WiFi.localIP().toString();
+  doc["wifi_ssid"] = runtimeConfig.wifiSsid;
+  doc["zenoh_mode"] = runtimeConfig.zenohMode;
+  doc["zenoh_connect"] = runtimeConfig.zenohConnect;
+  doc["zenoh_ready"] = zenohReady;
+  doc["camera_ready"] = cameraReady;
+  doc["lidar_frames"] = lidarFrames;
+  doc["follower_reports"] = followerReports;
+  JsonObject drive = doc["drive"].to<JsonObject>();
+  drive["version"] = runtimeConfig.drive.version;
+  drive["wheel_radius_m"] = runtimeConfig.drive.wheel_radius_m;
+  drive["drive_base_radius_m"] = runtimeConfig.drive.drive_base_radius_m;
+  drive["max_wheel_surface_speed_mps"] = runtimeConfig.drive.max_wheel_surface_speed_mps;
+  JsonArray polarity = drive["motor_polarity"].to<JsonArray>();
+  for (uint8_t i = 0; i < 3; ++i) {
+    polarity.add(runtimeConfig.drive.motor_polarity[i]);
+  }
+  drive["velocity_command_timeout_ms"] = runtimeConfig.drive.velocity_command_timeout_ms;
+  drive["acked_by_follower"] = driveParamsAckedVersion == runtimeConfig.drive.version;
+
+  String out;
+  serializeJson(doc, out);
+  httpServer.send(200, "application/json", out);
+}
+
+void sendHttpError(int code, const char *message) {
+  String out = "{\"ok\":false,\"error\":\"";
+  out += message;
+  out += "\"}";
+  httpServer.send(code, "application/json", out);
+}
+
+bool copyJsonString(JsonDocument &doc, const char *key, char *dst, size_t dstSize, bool *changed) {
+  if (!doc[key].is<const char *>()) {
+    return true;
+  }
+  const char *value = doc[key];
+  if (strlen(value) >= dstSize) {
+    return false;
+  }
+  if (strcmp(dst, value) != 0) {
+    strlcpy(dst, value, dstSize);
+    *changed = true;
+  }
+  return true;
+}
+
+void handleHttpConfig() {
+  if (!httpServer.hasArg("plain")) {
+    sendHttpError(400, "missing JSON body");
+    return;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, httpServer.arg("plain"))) {
+    sendHttpError(400, "invalid JSON");
+    return;
+  }
+
+  bool networkChanged = false;
+  if (!copyJsonString(doc, "wifi_ssid", runtimeConfig.wifiSsid,
+                      sizeof(runtimeConfig.wifiSsid), &networkChanged) ||
+      !copyJsonString(doc, "wifi_password", runtimeConfig.wifiPassword,
+                      sizeof(runtimeConfig.wifiPassword), &networkChanged) ||
+      !copyJsonString(doc, "zenoh_connect", runtimeConfig.zenohConnect,
+                      sizeof(runtimeConfig.zenohConnect), &networkChanged)) {
+    sendHttpError(400, "string field too long");
+    return;
+  }
+  if (doc["zenoh_mode"].is<const char *>()) {
+    const char *mode = doc["zenoh_mode"];
+    if (strcmp(mode, "client") != 0 && strcmp(mode, "peer") != 0) {
+      sendHttpError(400, "zenoh_mode must be client or peer");
+      return;
+    }
+    if (strcmp(runtimeConfig.zenohMode, mode) != 0) {
+      strlcpy(runtimeConfig.zenohMode, mode, sizeof(runtimeConfig.zenohMode));
+      networkChanged = true;
+    }
+  }
+
+  kiwi::DriveParamsPayload drive = runtimeConfig.drive;
+  bool driveChanged = false;
+  if (doc["wheel_radius_m"].is<float>()) {
+    drive.wheel_radius_m = doc["wheel_radius_m"];
+    driveChanged = true;
+  }
+  if (doc["drive_base_radius_m"].is<float>()) {
+    drive.drive_base_radius_m = doc["drive_base_radius_m"];
+    driveChanged = true;
+  }
+  if (doc["max_wheel_surface_speed_mps"].is<float>()) {
+    drive.max_wheel_surface_speed_mps = doc["max_wheel_surface_speed_mps"];
+    driveChanged = true;
+  }
+  if (doc["velocity_command_timeout_ms"].is<unsigned int>()) {
+    drive.velocity_command_timeout_ms = doc["velocity_command_timeout_ms"];
+    driveChanged = true;
+  }
+  if (doc["motor_polarity"].is<JsonArray>()) {
+    JsonArray polarity = doc["motor_polarity"];
+    if (polarity.size() != 3) {
+      sendHttpError(400, "motor_polarity must have 3 entries");
+      return;
+    }
+    for (uint8_t i = 0; i < 3; ++i) {
+      drive.motor_polarity[i] = polarity[i].as<int>();
+    }
+    driveChanged = true;
+  }
+
+  if (driveChanged) {
+    drive.version = runtimeConfig.drive.version + 1;
+    if (!kiwi::driveParamsValid(drive)) {
+      sendHttpError(400, "drive parameter out of range");
+      return;
+    }
+    runtimeConfig.drive = drive;
+    lastDriveParamsSendMs = 0;  // push to the follower immediately
+  }
+
+  saveRuntimeConfig();
+
+  JsonDocument resp;
+  resp["ok"] = true;
+  resp["reboot"] = networkChanged;
+  resp["drive_version"] = runtimeConfig.drive.version;
+  String out;
+  serializeJson(resp, out);
+  httpServer.send(200, "application/json", out);
+
+  if (networkChanged) {
+    Serial.println("Network config changed via /config; rebooting to apply.");
+    rebootPending = true;
+    rebootAtMs = millis() + 1500;
+  }
+}
+
+void startHttpServer() {
+  httpServer.on("/status", HTTP_GET, handleHttpStatus);
+  httpServer.on("/config", HTTP_POST, handleHttpConfig);
+  httpServer.onNotFound([]() { sendHttpError(404, "not found"); });
+  httpServer.begin();
+  Serial.printf("Provisioning HTTP server on http://%s/ (also on STA IP when connected)\n",
+                WiFi.softAPIP().toString().c_str());
 }
 
 void processLidar() {
@@ -601,6 +842,8 @@ void setup() {
   Serial.println();
   Serial.println("Booting kiwi master: camera + LD19 lidar + Zenoh + follower UART");
   Serial.printf("Namespace: %s\n", ROBOT_NAMESPACE);
+
+  loadRuntimeConfig();
 
   FollowerUart.begin(kiwi_config::kFollowerUartBaud,
                      SERIAL_8N1,
@@ -627,6 +870,7 @@ void setup() {
 
   cameraReady = initCamera();
   const bool wifiReady = connectWifi();
+  startHttpServer();
   zenohPublishMutex = xSemaphoreCreateMutex();
   if (wifiReady && zenohPublishMutex != nullptr) {
     zenohReady = startZenohSession();
@@ -636,8 +880,20 @@ void setup() {
 void loop() {
   processFollowerUart();
   processLidar();
+  httpServer.handleClient();
 
   const uint32_t nowMs = millis();
+  if (driveParamsAckedVersion != runtimeConfig.drive.version &&
+      nowMs - lastDriveParamsSendMs >= kDriveParamsResendMs) {
+    lastDriveParamsSendMs = nowMs;
+    sendDriveParamsToFollower();
+  }
+
+  if (rebootPending && static_cast<int32_t>(nowMs - rebootAtMs) >= 0) {
+    Serial.println("Rebooting now.");
+    Serial.flush();
+    ESP.restart();
+  }
   if (nowMs - lastCameraPublishMs >= kiwi_config::kCameraPublishPeriodMs) {
     lastCameraPublishMs = nowMs;
     publishCameraFrame();
