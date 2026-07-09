@@ -310,6 +310,8 @@ void startAccessPoint(bool staConnected) {
   }
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(kApSsid, kApPassword);
+  // Re-assert after the mode change; modem power-save throttles TCP badly.
+  WiFi.setSleep(false);
   apStarted = true;
   Serial.printf("Master AP: %s / %s at %s%s\n",
                 kApSsid,
@@ -320,15 +322,18 @@ void startAccessPoint(bool staConnected) {
 
 void startWifi() {
   WiFi.persistent(false);
-  WiFi.setSleep(false);
 
   if (strlen(runtimeConfig.wifiSsid) == 0) {
     Serial.println("No Wi-Fi configured; provision over the AP (POST /config) or add secrets.h.");
     startAccessPoint(false);
+    WiFi.setSleep(false);
     return;
   }
 
   WiFi.mode(WIFI_STA);
+  // Must come after mode(): modem power-save otherwise stays on and
+  // throttles TCP throughput to a crawl.
+  WiFi.setSleep(false);
 
   // One boot-time scan: proves the target is visible on 2.4 GHz and shows its
   // auth mode -- the difference between "bad password" and "can't even see it".
@@ -369,13 +374,16 @@ bool publishZenohBytes(z_owned_publisher_t *publisher, const uint8_t *data, size
   return ok;
 }
 
-bool declareZenohPublisher(const char *key, z_owned_publisher_t *publisher, z_priority_t priority) {
+bool declareZenohPublisher(const char *key,
+                           z_owned_publisher_t *publisher,
+                           z_priority_t priority,
+                           z_congestion_control_t congestion) {
   z_view_keyexpr_t keyexpr;
   z_view_keyexpr_from_str_unchecked(&keyexpr, key);
 
   z_publisher_options_t options;
   z_publisher_options_default(&options);
-  options.congestion_control = Z_CONGESTION_CONTROL_DROP;
+  options.congestion_control = congestion;
   options.priority = priority;
   options.is_express = true;
 
@@ -520,10 +528,23 @@ bool startZenohSession() {
     return false;
   }
 
-  if (!declareZenohPublisher(kZenohCameraKey, &cameraPub, Z_PRIORITY_DATA_HIGH) ||
-      !declareZenohPublisher(kZenohLidarRawKey, &lidarPub, Z_PRIORITY_REAL_TIME) ||
-      !declareZenohPublisher(kZenohTwistKey, &twistPub, Z_PRIORITY_REAL_TIME) ||
-      !declareZenohPublisher(kZenohStatusKey, &statusPub, Z_PRIORITY_INTERACTIVE_LOW) ||
+  // zenoh-pico needs its background tasks: the read task delivers subscriber
+  // callbacks (cmd_vel) and the lease task keeps the session alive.
+  if (zp_start_read_task(z_session_loan_mut(&zenohSession), NULL) < 0 ||
+      zp_start_lease_task(z_session_loan_mut(&zenohSession), NULL) < 0) {
+    Serial.println("Unable to start Zenoh read/lease tasks.");
+    z_session_drop(z_session_move(&zenohSession));
+    return false;
+  }
+
+  if (!declareZenohPublisher(kZenohCameraKey, &cameraPub, Z_PRIORITY_DATA_HIGH,
+                             Z_CONGESTION_CONTROL_DROP) ||
+      !declareZenohPublisher(kZenohLidarRawKey, &lidarPub, Z_PRIORITY_REAL_TIME,
+                             Z_CONGESTION_CONTROL_DROP) ||
+      !declareZenohPublisher(kZenohTwistKey, &twistPub, Z_PRIORITY_REAL_TIME,
+                             Z_CONGESTION_CONTROL_DROP) ||
+      !declareZenohPublisher(kZenohStatusKey, &statusPub, Z_PRIORITY_INTERACTIVE_LOW,
+                             Z_CONGESTION_CONTROL_DROP) ||
       !declareZenohSubscriber(kZenohCmdVelKey, &cmdVelSub, cmdVelHandler)) {
     Serial.println("Unable to declare one or more Zenoh resources.");
     z_session_drop(z_session_move(&zenohSession));
@@ -848,6 +869,7 @@ void maintainNetwork(uint32_t nowMs) {
 
   const bool staConnected = WiFi.status() == WL_CONNECTED;
   if (staConnected && !staWasConnected) {
+    WiFi.setSleep(false);
     Serial.printf("STA Wi-Fi ready: %s RSSI=%d\n",
                   WiFi.localIP().toString().c_str(),
                   WiFi.RSSI());
@@ -909,11 +931,15 @@ void setup() {
 
   loadRuntimeConfig();
 
+  // Generous RX buffers: blocking Zenoh publishes can stall the loop for
+  // tens of milliseconds, and both streams must survive that without loss.
+  FollowerUart.setRxBufferSize(4096);
   FollowerUart.begin(kiwi_config::kFollowerUartBaud,
                      SERIAL_8N1,
                      kiwi_config::kFollowerUartRxPin,
                      kiwi_config::kFollowerUartTxPin);
   // LD19 is transmit-only on serial; no TX pin needed toward the lidar.
+  LidarUart.setRxBufferSize(8192);
   LidarUart.begin(kiwi_config::kLidarBaud,
                   SERIAL_8N1,
                   kiwi_config::kLidarRxPin,
@@ -967,7 +993,8 @@ void loop() {
     lastStatusPublishMs = nowMs;
     publishStatus();
     Serial.printf("master status zenoh=%s wifi=%s lidar=%lu lidar_bytes=%lu lidar_bad=%lu "
-                  "follower=%lu follower_bad=%lu cmd=%lu heap=%lu\n",
+                  "follower=%lu follower_bad=%lu cmd=%lu cam=%lu/%lu lid_pub=%lu/%lu "
+                  "tw_pub=%lu/%lu heap=%lu\n",
                   zenohReady ? "ok" : "off",
                   WiFi.status() == WL_CONNECTED ? "ok" : "off",
                   static_cast<unsigned long>(lidarFrames),
@@ -976,6 +1003,12 @@ void loop() {
                   static_cast<unsigned long>(followerReports),
                   static_cast<unsigned long>(followerBadPackets),
                   static_cast<unsigned long>(velocityCommands),
+                  static_cast<unsigned long>(cameraPublished),
+                  static_cast<unsigned long>(cameraPublishErrors),
+                  static_cast<unsigned long>(lidarPublished),
+                  static_cast<unsigned long>(lidarPublishErrors),
+                  static_cast<unsigned long>(twistPublished),
+                  static_cast<unsigned long>(twistPublishErrors),
                   static_cast<unsigned long>(ESP.getFreeHeap()));
   }
 

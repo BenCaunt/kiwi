@@ -122,9 +122,14 @@ def build_config(args):
     if args.zenoh_connect is not None:
         config["zenoh_connect"] = args.zenoh_connect
     elif args.pc_ip is not None:
-        config["zenoh_connect"] = f"tcp/{args.pc_ip}:{args.zenoh_port}"
+        # UDP: zenoh-pico's TCP transport on the ESP32 starves under load
+        # (silently drops most payloads >47 B); UDP streams at full rate.
+        config["zenoh_connect"] = f"udp/{args.pc_ip}:{args.zenoh_port}"
     if args.zenoh_mode is not None:
         config["zenoh_mode"] = args.zenoh_mode
+    elif "zenoh_connect" in config:
+        # Connecting out to a zenohd router implies client mode.
+        config["zenoh_mode"] = "client"
     if args.wheel_radius is not None:
         config["wheel_radius_m"] = args.wheel_radius
     if args.base_radius is not None:
@@ -164,7 +169,8 @@ def print_status(status):
         print("\nRobot STA is NOT connected; it is reachable only on the AP.")
     if status.get("zenoh_connect"):
         port = status["zenoh_connect"].rsplit(":", 1)[-1]
-        print(f"Run the router on your laptop: zenohd --listen tcp/0.0.0.0:{port}")
+        print(f"Run the router on your laptop: "
+              f"zenohd --listen udp/0.0.0.0:{port} --listen tcp/0.0.0.0:{port}")
 
 
 def main():

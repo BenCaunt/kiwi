@@ -158,7 +158,13 @@ The script detects your current SSID and laptop IP, switches this Mac onto
 `KIWI-MASTER`, uploads the config, waits for the robot to join your network,
 switches your Mac back, and verifies the robot is reachable at its new IP.
 Pass `--ssid`/`--pc-ip` to override the detected values, then run
-`zenohd --listen tcp/0.0.0.0:7447`.
+`zenohd --listen udp/0.0.0.0:7447 --listen tcp/0.0.0.0:7447`.
+
+The robot's locator defaults to `udp/`: zenoh-pico's TCP transport on the
+ESP32 starves under load (raw TCP measured 231 KB/s, but the zenoh session
+managed ~15 KB/s and silently dropped nearly all payloads larger than a lidar
+frame). Over UDP every topic streams at full rate. Laptop-side clients can
+still connect to zenohd over TCP.
 
 Calibration while the robot is on your network (applies live, no reboot):
 
