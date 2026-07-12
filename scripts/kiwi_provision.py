@@ -143,6 +143,11 @@ def build_config(args):
         if len(polarity) != 3 or any(p not in (-1, 1) for p in polarity):
             sys.exit("--motor-polarity must be three comma-separated values of 1 or -1")
         config["motor_polarity"] = polarity
+    if args.encoder_polarity is not None:
+        enc = [int(p) for p in args.encoder_polarity.split(",")]
+        if len(enc) != 3 or any(p not in (-1, 1) for p in enc):
+            sys.exit("--encoder-polarity must be three comma-separated values of 1 or -1")
+        config["encoder_polarity"] = enc
     if args.motor_deadband is not None:
         deadband = [int(d) for d in args.motor_deadband.split(",")]
         if len(deadband) != 3 or any(not 0 <= d <= 90 for d in deadband):
@@ -206,6 +211,9 @@ def main():
     parser.add_argument("--max-speed", type=float, help="max wheel surface speed in m/s")
     parser.add_argument("--cmd-timeout-ms", type=int, help="velocity command timeout")
     parser.add_argument("--motor-polarity", help="three comma-separated 1/-1, e.g. '1,-1,1'")
+    parser.add_argument("--encoder-polarity",
+                        help="three comma-separated 1/-1; flip together with the matching "
+                        "motor_polarity entry when a wheel is physically reversed")
     parser.add_argument("--motor-deadband",
                         help="three comma-separated breakaway percents, e.g. '32,28,45'")
     parser.add_argument("--pid-kp", type=float, help="wheel PI proportional gain, %% per m/s")

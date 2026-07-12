@@ -79,6 +79,7 @@ void loadDriveParams() {
   for (uint8_t i = 0; i < 3; ++i) {
     driveParams.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
     driveParams.motor_deadband_pct[i] = 0;
+    driveParams.encoder_polarity[i] = kiwi_config::kEncoderPolarity[i];
   }
   driveParams.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
   driveParams.pid_kp = 0.0f;
@@ -229,7 +230,7 @@ int32_t signedAs5600Delta(uint16_t current, uint16_t previous) {
 }
 
 float wheelAngleFromRaw(uint8_t index, uint16_t raw) {
-  if (kiwi_config::kEncoderPolarity[index] < 0) {
+  if (driveParams.encoder_polarity[index] < 0) {
     raw = static_cast<uint16_t>((kAs5600CountsPerRev - raw) % kAs5600CountsPerRev);
   }
   return (static_cast<float>(raw) * kTwoPi) / kAs5600CountsPerRev;
@@ -275,7 +276,7 @@ void updateEncoders() {
     }
 
     int32_t delta = signedAs5600Delta(raw, encoder.lastRaw);
-    delta *= kiwi_config::kEncoderPolarity[i] >= 0 ? 1 : -1;
+    delta *= driveParams.encoder_polarity[i] >= 0 ? 1 : -1;
     const uint32_t dtUs = nowUs - encoder.updatedUs;
     if (dtUs > 0) {
       const float deltaRad = (static_cast<float>(delta) * kTwoPi) / kAs5600CountsPerRev;

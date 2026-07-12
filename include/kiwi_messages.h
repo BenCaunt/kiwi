@@ -66,7 +66,10 @@ struct __attribute__((packed)) DriveParamsPayload {
   float pid_kp;  // percent per (m/s) of speed error
   float pid_ki;  // percent per (m/s * s) of integrated error
   uint8_t closed_loop;  // 0 = feedforward only, 1 = feedforward + PI
-  uint8_t reserved[3];
+  // Encoder count sign per wheel. Flip together with motor_polarity (same
+  // packet = atomic) when a wheel is physically reversed, or the closed
+  // loop's feedback inverts and fights itself.
+  int8_t encoder_polarity[3];
 };
 
 struct __attribute__((packed)) DriveParamsAckPayload {
@@ -98,6 +101,9 @@ inline bool driveParamsValid(const DriveParamsPayload &params) {
       return false;
     }
     if (params.motor_deadband_pct[i] > 90) {
+      return false;
+    }
+    if (params.encoder_polarity[i] != 1 && params.encoder_polarity[i] != -1) {
       return false;
     }
   }

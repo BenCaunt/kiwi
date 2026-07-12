@@ -193,6 +193,7 @@ void loadRuntimeConfig() {
   for (uint8_t i = 0; i < 3; ++i) {
     runtimeConfig.drive.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
     runtimeConfig.drive.motor_deadband_pct[i] = 0;
+    runtimeConfig.drive.encoder_polarity[i] = kiwi_config::kEncoderPolarity[i];
   }
   runtimeConfig.drive.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
   runtimeConfig.drive.pid_kp = 0.0f;
@@ -750,6 +751,10 @@ void handleHttpStatus() {
   drive["pid_kp"] = runtimeConfig.drive.pid_kp;
   drive["pid_ki"] = runtimeConfig.drive.pid_ki;
   drive["closed_loop"] = runtimeConfig.drive.closed_loop;
+  JsonArray encPolarity = drive["encoder_polarity"].to<JsonArray>();
+  for (uint8_t i = 0; i < 3; ++i) {
+    encPolarity.add(runtimeConfig.drive.encoder_polarity[i]);
+  }
   drive["acked_by_follower"] = driveParamsAckedVersion == runtimeConfig.drive.version;
 
   String out;
@@ -839,6 +844,17 @@ void handleHttpConfig() {
     }
     for (uint8_t i = 0; i < 3; ++i) {
       drive.motor_polarity[i] = polarity[i].as<int>();
+    }
+    driveChanged = true;
+  }
+  if (doc["encoder_polarity"].is<JsonArray>()) {
+    JsonArray encPolarity = doc["encoder_polarity"];
+    if (encPolarity.size() != 3) {
+      sendHttpError(400, "encoder_polarity must have 3 entries");
+      return;
+    }
+    for (uint8_t i = 0; i < 3; ++i) {
+      drive.encoder_polarity[i] = encPolarity[i].as<int>();
     }
     driveChanged = true;
   }
