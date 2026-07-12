@@ -10,6 +10,11 @@ Teleop (default):
   w/s: +/-vx (forward/back)   a/d: +/-vy (left/right)
   q/e: +/-omega (spin CCW/CW) space: stop   +/-: speed   ctrl-c: quit
 
+Gamepad (proportional, needs pygame):
+  python3 scripts/kiwi_teleop.py --gamepad
+  left stick: translate   right stick X: rotate   ctrl-c: quit
+  --speed/--omega set full-deflection rates; --ax-vx/--ax-vy/--ax-om remap axes.
+
 Axis test -- put the robot WHEELS UP first:
   python3 scripts/kiwi_teleop.py --test
   Drives +vx, +vy, +omega in turn while printing the encoder-measured twist.
@@ -150,6 +155,61 @@ def teleop(link, speed, omega):
         print("\nstopping")
 
 
+GAMEPAD_DEADZONE = 0.12
+
+
+def _deadzone(value):
+    if abs(value) < GAMEPAD_DEADZONE:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * min((abs(value) - GAMEPAD_DEADZONE) / (1.0 - GAMEPAD_DEADZONE), 1.0)
+
+
+def gamepad_teleop(link, speed, omega, ax_vx, ax_vy, ax_om):
+    import os
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    import pygame
+    pygame.init()
+    pygame.joystick.init()
+    if pygame.joystick.get_count() == 0:
+        sys.exit("no gamepad detected (pair/plug it in, then rerun)")
+    pad = pygame.joystick.Joystick(0)
+    pad.init()
+    print(f"gamepad: {pad.get_name()} ({pad.get_numaxes()} axes)")
+    print(f"full deflection = {speed:.2f} m/s translate, {omega:.2f} rad/s rotate. ctrl-c to quit.")
+
+    def axis(i):
+        return _deadzone(float(pad.get_axis(i))) if i < pad.get_numaxes() else 0.0
+
+    last_print = 0.0
+    try:
+        while True:
+            pygame.event.pump()
+            x = axis(ax_vy)   # left stick X: + is right
+            y = axis(ax_vx)   # left stick Y: + is down
+            r = axis(ax_om)   # right stick X: + is right
+            mag = (x * x + y * y) ** 0.5
+            if mag > 1.0:
+                x /= mag
+                y /= mag
+            vx = -y * speed       # stick up = forward
+            vy = -x * speed       # stick left = +vy (robot left)
+            om = -r * omega       # stick right = clockwise = -omega
+            link.send(vx, vy, om)
+            now = time.time()
+            if now - last_print > 0.5:
+                last_print = now
+                m = (link.measured or {}).get("measured", {})
+                print(f"\rcmd vx={vx:+.2f} vy={vy:+.2f} om={om:+.2f} | "
+                      f"meas vx={m.get('vx', 0):+.2f} vy={m.get('vy', 0):+.2f} "
+                      f"om={m.get('omega', 0):+.2f}   ", end="", flush=True)
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\nstopping")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -162,12 +222,20 @@ def main():
                         help="angular speed in rad/s (default 1.0)")
     parser.add_argument("--test", action="store_true",
                         help="run the automated axis/polarity test instead of teleop")
+    parser.add_argument("--gamepad", action="store_true",
+                        help="drive with a gamepad (left stick translate, right stick X rotate)")
+    parser.add_argument("--ax-vx", type=int, default=1, help="gamepad axis for forward/back")
+    parser.add_argument("--ax-vy", type=int, default=0, help="gamepad axis for strafe")
+    parser.add_argument("--ax-om", type=int, default=2, help="gamepad axis for rotation")
     args = parser.parse_args()
 
     link = Link(args.connect, args.namespace)
     try:
         if args.test:
             axis_test(link, args.speed, args.omega)
+        elif args.gamepad:
+            gamepad_teleop(link, args.speed, args.omega,
+                           args.ax_vx, args.ax_vy, args.ax_om)
         else:
             teleop(link, args.speed, args.omega)
     finally:
