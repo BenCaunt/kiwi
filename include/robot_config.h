@@ -38,10 +38,12 @@ constexpr uint8_t kTca9548aAddress = 0x70;
 constexpr uint8_t kAs5600Address = 0x36;
 // Measured 2026-07-08 with the motor_encoder_map test (post chassis rebuild):
 // motor i drives the wheel whose AS5600 sits on mux channel
-// kEncoderTcaChannels[i]. Polarity is chosen so a positive motor command
-// increases the reported count.
+// kEncoderTcaChannels[i].
 constexpr uint8_t kEncoderTcaChannels[3] = {2, 1, 0};
-constexpr int8_t kEncoderPolarity[3] = {-1, 1, -1};
+// Polarities verified by eye 2026-07-11 (motor on mux ch1 is physically
+// reversed): these are NVS fallback defaults and MUST match the kinematic
+// convention, or the robot mirrors wheel 1 if NVS is ever wiped.
+constexpr int8_t kEncoderPolarity[3] = {-1, -1, -1};
 
 // Follower motor outputs (same mapping run): the second Dominion's DRIVEN
 // input is on D3 and its arming input is on D1, so D3 is a motor pin here.
@@ -52,7 +54,7 @@ constexpr uint8_t kMotorPwmChannels[3] = {0, 1, 2};
 // pin must always output 1500 us.
 constexpr uint8_t kEscAuxNeutralPin = D1;
 constexpr uint8_t kEscAuxNeutralPwmChannel = 3;
-constexpr int8_t kMotorPolarity[3] = {1, 1, 1};
+constexpr int8_t kMotorPolarity[3] = {1, -1, 1};
 constexpr uint32_t kEscPwmFrequencyHz = 50;
 constexpr uint8_t kEscPwmResolutionBits = 14;
 constexpr uint16_t kEscMinPulseUs = 1000;
@@ -63,7 +65,9 @@ constexpr uint16_t kEscMaxPulseUs = 2000;
 // measured from robot +X, with each omni wheel driving tangentially.
 constexpr float kWheelRadiusM = 0.025f;
 constexpr float kDriveBaseRadiusM = 0.090f;
-constexpr float kMaxWheelSurfaceSpeedMps = 1.0f;
+// Measured no-load top speed 2026-07-11 (kiwi_characterize.py); also the
+// velocity feedforward gain, so keep it truthful.
+constexpr float kMaxWheelSurfaceSpeedMps = 3.23f;
 constexpr float kWheelAnglesRad[3] = {
     0.0f,
     2.09439510239f,
