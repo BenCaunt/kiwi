@@ -163,6 +163,29 @@ struct Ld19Reader {
 
 Ld19Reader lidarReader;
 
+// LD19 CRC8: poly 0x4D, MSB-first, init 0, over the first 46 frame bytes.
+// Validated against live sensor data (~1.5% of frames arrive corrupted).
+uint8_t ld19CrcTable[256];
+
+void initLd19CrcTable() {
+  for (uint16_t i = 0; i < 256; ++i) {
+    uint8_t crc = static_cast<uint8_t>(i);
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x4d)
+                         : static_cast<uint8_t>(crc << 1);
+    }
+    ld19CrcTable[i] = crc;
+  }
+}
+
+bool ld19FrameCrcOk(const uint8_t *frame) {
+  uint8_t crc = 0;
+  for (size_t i = 0; i + 1 < kLd19FrameBytes; ++i) {
+    crc = ld19CrcTable[crc ^ frame[i]];
+  }
+  return crc == frame[kLd19FrameBytes - 1];
+}
+
 void writeLe16(uint8_t *dst, uint16_t value) {
   dst[0] = value & 0xff;
   dst[1] = (value >> 8) & 0xff;
@@ -965,6 +988,10 @@ void startHttpServer() {
 void processLidar() {
   uint8_t frame[kLd19FrameBytes] = {};
   while (lidarReader.readFrom(LidarUart, frame)) {
+    if (!ld19FrameCrcOk(frame)) {
+      ++lidarBadFrames;
+      continue;
+    }
     ++lidarFrames;
     publishLidarFrame(frame);
   }
@@ -979,6 +1006,7 @@ void setup() {
   Serial.println("Booting kiwi master: camera + LD19 lidar + Zenoh + follower UART");
   Serial.printf("Namespace: %s\n", ROBOT_NAMESPACE);
 
+  initLd19CrcTable();
   loadRuntimeConfig();
 
   // Generous RX buffers: blocking Zenoh publishes can stall the loop for
