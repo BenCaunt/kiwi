@@ -55,6 +55,8 @@ bool commandActive = false;
 bool imuReady = false;
 bool imuReportsEnabled = false;
 uint8_t imuAddress = 0;
+float imuQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // i, j, k, real
+float imuAccel[3] = {};
 uint16_t reportTxSeq = 0;
 uint32_t reportSeq = 0;
 uint32_t commandsReceived = 0;
@@ -440,9 +442,17 @@ void updateImu() {
     imuReportsEnabled = imu.enableAccelerometer(kiwi_config::kImuReportIntervalMs) || imuReportsEnabled;
   }
   for (uint8_t i = 0; i < 4 && imu.getSensorEvent(); ++i) {
-    // Reports are consumed here so the BNO08x FIFO does not back up. The first
-    // robot-facing telemetry contract is wheel odometry; IMU fields can be
-    // added to TwistReportPayload once mounting orientation is fixed.
+    const uint8_t eventId = imu.getSensorEventID();
+    if (eventId == SENSOR_REPORTID_ROTATION_VECTOR) {
+      imuQuat[0] = imu.getQuatI();
+      imuQuat[1] = imu.getQuatJ();
+      imuQuat[2] = imu.getQuatK();
+      imuQuat[3] = imu.getQuatReal();
+    } else if (eventId == SENSOR_REPORTID_ACCELEROMETER) {
+      imuAccel[0] = imu.getAccelX();
+      imuAccel[1] = imu.getAccelY();
+      imuAccel[2] = imu.getAccelZ();
+    }
   }
 }
 
@@ -546,6 +556,12 @@ void sendTwistReport() {
     report.encoder_count[i] = encoders[i].count;
   }
   report.imu_ready = imuReady ? 1 : 0;
+  for (uint8_t i = 0; i < 4; ++i) {
+    report.imu_quat_ijkr[i] = imuQuat[i];
+  }
+  for (uint8_t i = 0; i < 3; ++i) {
+    report.imu_accel_mps2[i] = imuAccel[i];
+  }
   report.encoder_ready_mask = encoderReadyMask();
   report.status_flags = 0;
   if (!commandActive) {

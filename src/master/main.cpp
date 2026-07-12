@@ -647,7 +647,9 @@ void publishTwistReport(const TwistReportPayload &report) {
       "\"wheel_speed_mps\":[%.6f,%.6f,%.6f],"
       "\"wheel_angle_rad\":[%.6f,%.6f,%.6f],"
       "\"encoder_count\":[%lld,%lld,%lld],"
-      "\"imu_ready\":%s,\"encoder_ready_mask\":%u,\"status_flags\":%u}",
+      "\"imu_ready\":%s,\"encoder_ready_mask\":%u,\"status_flags\":%u,"
+      "\"imu_quat_ijkr\":[%.6f,%.6f,%.6f,%.6f],"
+      "\"imu_accel_mps2\":[%.4f,%.4f,%.4f]}",
       static_cast<unsigned long long>(report.follower_time_us),
       static_cast<unsigned long>(report.report_seq),
       report.measured_vx_mps,
@@ -667,7 +669,14 @@ void publishTwistReport(const TwistReportPayload &report) {
       static_cast<long long>(report.encoder_count[2]),
       report.imu_ready != 0 ? "true" : "false",
       report.encoder_ready_mask,
-      report.status_flags);
+      report.status_flags,
+      report.imu_quat_ijkr[0],
+      report.imu_quat_ijkr[1],
+      report.imu_quat_ijkr[2],
+      report.imu_quat_ijkr[3],
+      report.imu_accel_mps2[0],
+      report.imu_accel_mps2[1],
+      report.imu_accel_mps2[2]);
 
   if (written <= 0) {
     ++twistPublishErrors;

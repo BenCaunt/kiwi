@@ -44,6 +44,9 @@ struct __attribute__((packed)) TwistReportPayload {
   uint8_t imu_ready;
   uint8_t encoder_ready_mask;
   uint16_t status_flags;
+  // BNO08x fused rotation vector (i, j, k, real) and raw accelerometer.
+  float imu_quat_ijkr[4];
+  float imu_accel_mps2[3];
 };
 
 // Runtime-tunable drive parameters, master -> follower. The follower applies
@@ -77,7 +80,7 @@ struct __attribute__((packed)) DriveParamsAckPayload {
 };
 
 static_assert(sizeof(VelocityCommandPayload) == 24, "Unexpected velocity command size");
-static_assert(sizeof(TwistReportPayload) == 88, "Unexpected twist report size");
+static_assert(sizeof(TwistReportPayload) == 116, "Unexpected twist report size");
 static_assert(sizeof(DriveParamsPayload) == 36, "Unexpected drive params size");
 static_assert(sizeof(DriveParamsAckPayload) == 4, "Unexpected drive params ack size");
 
