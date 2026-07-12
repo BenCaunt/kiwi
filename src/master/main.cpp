@@ -192,8 +192,12 @@ void loadRuntimeConfig() {
   runtimeConfig.drive.max_wheel_surface_speed_mps = kiwi_config::kMaxWheelSurfaceSpeedMps;
   for (uint8_t i = 0; i < 3; ++i) {
     runtimeConfig.drive.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
+    runtimeConfig.drive.motor_deadband_pct[i] = 0;
   }
   runtimeConfig.drive.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
+  runtimeConfig.drive.pid_kp = 0.0f;
+  runtimeConfig.drive.pid_ki = 0.0f;
+  runtimeConfig.drive.closed_loop = 0;
 
   configPrefs.begin("kiwi", true);
   if (configPrefs.isKey("ssid")) {
@@ -739,6 +743,13 @@ void handleHttpStatus() {
     polarity.add(runtimeConfig.drive.motor_polarity[i]);
   }
   drive["velocity_command_timeout_ms"] = runtimeConfig.drive.velocity_command_timeout_ms;
+  JsonArray deadband = drive["motor_deadband_pct"].to<JsonArray>();
+  for (uint8_t i = 0; i < 3; ++i) {
+    deadband.add(runtimeConfig.drive.motor_deadband_pct[i]);
+  }
+  drive["pid_kp"] = runtimeConfig.drive.pid_kp;
+  drive["pid_ki"] = runtimeConfig.drive.pid_ki;
+  drive["closed_loop"] = runtimeConfig.drive.closed_loop;
   drive["acked_by_follower"] = driveParamsAckedVersion == runtimeConfig.drive.version;
 
   String out;
@@ -829,6 +840,29 @@ void handleHttpConfig() {
     for (uint8_t i = 0; i < 3; ++i) {
       drive.motor_polarity[i] = polarity[i].as<int>();
     }
+    driveChanged = true;
+  }
+  if (doc["motor_deadband_pct"].is<JsonArray>()) {
+    JsonArray deadband = doc["motor_deadband_pct"];
+    if (deadband.size() != 3) {
+      sendHttpError(400, "motor_deadband_pct must have 3 entries");
+      return;
+    }
+    for (uint8_t i = 0; i < 3; ++i) {
+      drive.motor_deadband_pct[i] = deadband[i].as<unsigned int>();
+    }
+    driveChanged = true;
+  }
+  if (doc["pid_kp"].is<float>()) {
+    drive.pid_kp = doc["pid_kp"];
+    driveChanged = true;
+  }
+  if (doc["pid_ki"].is<float>()) {
+    drive.pid_ki = doc["pid_ki"];
+    driveChanged = true;
+  }
+  if (doc["closed_loop"].is<unsigned int>() || doc["closed_loop"].is<bool>()) {
+    drive.closed_loop = doc["closed_loop"].as<bool>() ? 1 : 0;
     driveChanged = true;
   }
 

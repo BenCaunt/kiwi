@@ -143,6 +143,17 @@ def build_config(args):
         if len(polarity) != 3 or any(p not in (-1, 1) for p in polarity):
             sys.exit("--motor-polarity must be three comma-separated values of 1 or -1")
         config["motor_polarity"] = polarity
+    if args.motor_deadband is not None:
+        deadband = [int(d) for d in args.motor_deadband.split(",")]
+        if len(deadband) != 3 or any(not 0 <= d <= 90 for d in deadband):
+            sys.exit("--motor-deadband must be three comma-separated percents (0-90)")
+        config["motor_deadband_pct"] = deadband
+    if args.pid_kp is not None:
+        config["pid_kp"] = args.pid_kp
+    if args.pid_ki is not None:
+        config["pid_ki"] = args.pid_ki
+    if args.closed_loop is not None:
+        config["closed_loop"] = args.closed_loop
     return config
 
 
@@ -195,6 +206,12 @@ def main():
     parser.add_argument("--max-speed", type=float, help="max wheel surface speed in m/s")
     parser.add_argument("--cmd-timeout-ms", type=int, help="velocity command timeout")
     parser.add_argument("--motor-polarity", help="three comma-separated 1/-1, e.g. '1,-1,1'")
+    parser.add_argument("--motor-deadband",
+                        help="three comma-separated breakaway percents, e.g. '32,28,45'")
+    parser.add_argument("--pid-kp", type=float, help="wheel PI proportional gain, %% per m/s")
+    parser.add_argument("--pid-ki", type=float, help="wheel PI integral gain, %% per m/s*s")
+    parser.add_argument("--closed-loop", type=int, choices=[0, 1],
+                        help="1 = feedforward + PI on wheel speed, 0 = feedforward only")
     args = parser.parse_args()
 
     # Direct mode: talk to the given host, no WiFi switching.

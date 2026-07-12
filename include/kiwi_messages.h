@@ -54,11 +54,19 @@ struct __attribute__((packed)) DriveParamsPayload {
   uint32_t version;
   float wheel_radius_m;
   float drive_base_radius_m;
+  // Doubles as the velocity feedforward gain: percent = 100 * target / max.
+  // Calibrate to the true no-load top wheel speed for accurate feedforward.
   float max_wheel_surface_speed_mps;
   int8_t motor_polarity[3];
-  uint8_t reserved;
+  // ESC breakaway compensation: commands are remapped so |percent| starts at
+  // this value. 0 disables. Measured per motor (they vary 30-70%).
+  uint8_t motor_deadband_pct[3];
   uint16_t velocity_command_timeout_ms;
-  uint16_t reserved2;
+  // PI feedback on encoder-measured wheel speed, on top of the feedforward.
+  float pid_kp;  // percent per (m/s) of speed error
+  float pid_ki;  // percent per (m/s * s) of integrated error
+  uint8_t closed_loop;  // 0 = feedforward only, 1 = feedforward + PI
+  uint8_t reserved[3];
 };
 
 struct __attribute__((packed)) DriveParamsAckPayload {
@@ -67,7 +75,7 @@ struct __attribute__((packed)) DriveParamsAckPayload {
 
 static_assert(sizeof(VelocityCommandPayload) == 24, "Unexpected velocity command size");
 static_assert(sizeof(TwistReportPayload) == 88, "Unexpected twist report size");
-static_assert(sizeof(DriveParamsPayload) == 24, "Unexpected drive params size");
+static_assert(sizeof(DriveParamsPayload) == 36, "Unexpected drive params size");
 static_assert(sizeof(DriveParamsAckPayload) == 4, "Unexpected drive params ack size");
 
 // Shared sanity bounds so master and follower reject the same nonsense.
@@ -89,9 +97,21 @@ inline bool driveParamsValid(const DriveParamsPayload &params) {
     if (params.motor_polarity[i] != 1 && params.motor_polarity[i] != -1) {
       return false;
     }
+    if (params.motor_deadband_pct[i] > 90) {
+      return false;
+    }
   }
   if (params.velocity_command_timeout_ms < 20 ||
       params.velocity_command_timeout_ms > 10000) {
+    return false;
+  }
+  if (!isfinite(params.pid_kp) || params.pid_kp < 0.0f || params.pid_kp > 500.0f) {
+    return false;
+  }
+  if (!isfinite(params.pid_ki) || params.pid_ki < 0.0f || params.pid_ki > 2000.0f) {
+    return false;
+  }
+  if (params.closed_loop > 1) {
     return false;
   }
   return true;

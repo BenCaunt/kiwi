@@ -36,6 +36,7 @@ struct EncoderState {
   uint16_t lastRaw = 0;
   int64_t count = 0;
   float wheelSpeedMps = 0.0f;
+  float filteredSpeedMps = 0.0f;  // EMA for the control loop
   float wheelAngleRad = 0.0f;
   uint32_t updatedUs = 0;
   uint32_t samples = 0;
@@ -62,6 +63,14 @@ uint32_t lastEncoderSampleMs = 0;
 uint32_t lastReportMs = 0;
 uint32_t lastSerialStatusMs = 0;
 
+// Wheel velocity control: feedforward from max_wheel_surface_speed plus an
+// optional PI on the encoder-measured speed (driveParams.closed_loop).
+constexpr uint32_t kControlPeriodMs = 10;
+constexpr float kIntegralTermLimitPct = 40.0f;
+float wheelTargetsMps[3] = {};
+float wheelIntegrals[3] = {};
+uint32_t lastControlMs = 0;
+
 void loadDriveParams() {
   driveParams.version = 0;
   driveParams.wheel_radius_m = kiwi_config::kWheelRadiusM;
@@ -69,8 +78,12 @@ void loadDriveParams() {
   driveParams.max_wheel_surface_speed_mps = kiwi_config::kMaxWheelSurfaceSpeedMps;
   for (uint8_t i = 0; i < 3; ++i) {
     driveParams.motor_polarity[i] = kiwi_config::kMotorPolarity[i];
+    driveParams.motor_deadband_pct[i] = 0;
   }
   driveParams.velocity_command_timeout_ms = kiwi_config::kVelocityCommandTimeoutMs;
+  driveParams.pid_kp = 0.0f;
+  driveParams.pid_ki = 0.0f;
+  driveParams.closed_loop = 0;
 
   configPrefs.begin("kiwi", true);
   DriveParamsPayload stored = {};
@@ -120,6 +133,14 @@ uint16_t motorPercentToPulseUs(float percent) {
 void setMotorPercent(uint8_t index, float percent) {
   if (index >= 3) {
     return;
+  }
+  // Deadband compensation: remap nonzero commands to start at the motor's
+  // measured breakaway percentage so slow twists actually move every wheel.
+  const float deadband = driveParams.motor_deadband_pct[index];
+  if (deadband > 0.0f && percent != 0.0f) {
+    const float magnitude = constrain(fabsf(percent), 0.0f, 100.0f);
+    percent = copysignf(deadband + ((100.0f - deadband) * magnitude) / 100.0f,
+                        percent);
   }
   percent *= driveParams.motor_polarity[index] >= 0 ? 1.0f : -1.0f;
   const uint16_t pulseUs = motorPercentToPulseUs(percent);
@@ -259,6 +280,7 @@ void updateEncoders() {
     if (dtUs > 0) {
       const float deltaRad = (static_cast<float>(delta) * kTwoPi) / kAs5600CountsPerRev;
       encoder.wheelSpeedMps = (deltaRad * driveParams.wheel_radius_m) / (static_cast<float>(dtUs) * 1.0e-6f);
+      encoder.filteredSpeedMps += 0.3f * (encoder.wheelSpeedMps - encoder.filteredSpeedMps);
     }
     encoder.count += delta;
     encoder.raw = raw;
@@ -306,23 +328,53 @@ void applyActiveCommand() {
   if (!commandActive ||
       millis() - lastCommandMs > max<uint32_t>(activeCommand.timeout_ms, 1)) {
     commandActive = false;
+  }
+
+  if (!commandActive ||
+      activeCommand.mode == static_cast<uint8_t>(VelocityMode::Stop)) {
+    for (uint8_t i = 0; i < 3; ++i) {
+      wheelTargetsMps[i] = 0.0f;
+      wheelIntegrals[i] = 0.0f;
+    }
     stopMotors();
     return;
   }
 
-  if (activeCommand.mode == static_cast<uint8_t>(VelocityMode::Stop)) {
-    stopMotors();
-    return;
-  }
-
-  float wheelMps[3] = {};
   wheelSpeedsFromTwist(activeCommand.vx_mps,
                        activeCommand.vy_mps,
                        activeCommand.omega_radps,
-                       wheelMps);
+                       wheelTargetsMps);
+}
+
+void updateWheelControl(uint32_t nowMs) {
+  if (nowMs - lastControlMs < kControlPeriodMs) {
+    return;
+  }
+  const float dtS = static_cast<float>(nowMs - lastControlMs) * 1.0e-3f;
+  lastControlMs = nowMs;
+
+  if (!commandActive) {
+    return;  // applyActiveCommand already forced neutral + cleared integrals
+  }
+
   for (uint8_t i = 0; i < 3; ++i) {
-    const float percent = (wheelMps[i] / driveParams.max_wheel_surface_speed_mps) * 100.0f;
-    setMotorPercent(i, percent);
+    const float target = wheelTargetsMps[i];
+    if (fabsf(target) < 0.01f) {
+      wheelIntegrals[i] = 0.0f;
+      setMotorPercent(i, 0.0f);
+      continue;
+    }
+
+    float percent = (target / driveParams.max_wheel_surface_speed_mps) * 100.0f;
+    if (driveParams.closed_loop != 0) {
+      const float error = target - encoders[i].filteredSpeedMps;
+      if (driveParams.pid_ki > 0.0f) {
+        const float limit = kIntegralTermLimitPct / driveParams.pid_ki;
+        wheelIntegrals[i] = constrain(wheelIntegrals[i] + error * dtS, -limit, limit);
+      }
+      percent += driveParams.pid_kp * error + driveParams.pid_ki * wheelIntegrals[i];
+    }
+    setMotorPercent(i, constrain(percent, -100.0f, 100.0f));
   }
 }
 
@@ -552,6 +604,7 @@ void loop() {
 
   updateImu();
   applyActiveCommand();
+  updateWheelControl(nowMs);
 
   if (nowMs - lastReportMs >= kiwi_config::kFollowerReportPeriodMs) {
     lastReportMs = nowMs;
