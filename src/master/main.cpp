@@ -71,13 +71,19 @@ uint32_t driveParamsAckedVersion = 0xffffffff;
 uint32_t lastDriveParamsSendMs = 0;
 bool rebootPending = false;
 uint32_t rebootAtMs = 0;
-constexpr uint32_t kStaRetryMs = 20000;
+// STA joins are scan-gated: we only call WiFi.begin when a scan actually
+// sees the stored SSID. Blind retries (plus the driver's auto-reconnect)
+// drag the radio off-channel continuously, starving the soft-AP's beacons --
+// which made KIWI-MASTER invisible precisely when away from the home
+// network, the one situation provisioning exists for.
+constexpr uint32_t kStaScanIntervalMs = 30000;
+bool staScanInFlight = false;
 constexpr uint32_t kZenohRetryMs = 10000;
 // The soft-AP pins the radio to its channel, which can break STA auth against
 // a router on a different channel (endless AUTH_EXPIRE). So: STA joins first
 // and the AP comes up on the STA's channel; if the join hasn't landed by this
 // deadline, start the AP anyway so provisioning stays reachable.
-constexpr uint32_t kApFallbackMs = 30000;
+constexpr uint32_t kApFallbackMs = 15000;
 bool apStarted = false;
 bool staWasConnected = false;
 uint32_t lastStaAttemptMs = 0;
@@ -365,20 +371,31 @@ void startWifi() {
 
   // One boot-time scan: proves the target is visible on 2.4 GHz and shows its
   // auth mode -- the difference between "bad password" and "can't even see it".
+  bool targetVisible = false;
   const int16_t found = WiFi.scanNetworks();
   for (int16_t i = 0; i < found; ++i) {
+    const bool isTarget = WiFi.SSID(i) == runtimeConfig.wifiSsid;
+    targetVisible |= isTarget;
     Serial.printf("  scan: %-32s ch=%2d rssi=%d auth=%d%s\n",
                   WiFi.SSID(i).c_str(),
                   WiFi.channel(i),
                   WiFi.RSSI(i),
                   static_cast<int>(WiFi.encryptionType(i)),
-                  WiFi.SSID(i) == runtimeConfig.wifiSsid ? "  <-- target" : "");
+                  isTarget ? "  <-- target" : "");
   }
   WiFi.scanDelete();
 
-  Serial.printf("Connecting STA Wi-Fi to %s (retries in the background; AP follows)\n",
-                runtimeConfig.wifiSsid);
-  WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
+  WiFi.setAutoReconnect(false);  // rejoins are scan-gated in maintainNetwork
+  if (targetVisible) {
+    Serial.printf("Connecting STA Wi-Fi to %s (AP follows on its channel)\n",
+                  runtimeConfig.wifiSsid);
+    WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
+  } else {
+    Serial.printf("'%s' not in range; starting AP now, rescanning every %lus\n",
+                  runtimeConfig.wifiSsid,
+                  static_cast<unsigned long>(kStaScanIntervalMs / 1000));
+    startAccessPoint(false);
+  }
   lastStaAttemptMs = millis();
 }
 
@@ -967,13 +984,31 @@ void maintainNetwork(uint32_t nowMs) {
   }
 
   if (!staConnected) {
-    if (nowMs - lastStaAttemptMs >= kStaRetryMs) {
+    // Scan-gated rejoin: an async scan every 30 s, and WiFi.begin only when
+    // the SSID is actually visible. Keeps the AP's beacons stable otherwise.
+    if (staScanInFlight) {
+      const int16_t n = WiFi.scanComplete();
+      if (n >= 0) {
+        bool visible = false;
+        for (int16_t i = 0; i < n; ++i) {
+          if (WiFi.SSID(i) == runtimeConfig.wifiSsid) {
+            visible = true;
+            break;
+          }
+        }
+        WiFi.scanDelete();
+        staScanInFlight = false;
+        if (visible) {
+          Serial.printf("'%s' in range; attempting STA join\n", runtimeConfig.wifiSsid);
+          WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
+        }
+      } else if (n == WIFI_SCAN_FAILED) {
+        staScanInFlight = false;
+      }
+    } else if (nowMs - lastStaAttemptMs >= kStaScanIntervalMs) {
       lastStaAttemptMs = nowMs;
-      Serial.printf("Retrying STA Wi-Fi to %s (status=%d)\n",
-                    runtimeConfig.wifiSsid,
-                    static_cast<int>(WiFi.status()));
-      WiFi.disconnect();
-      WiFi.begin(runtimeConfig.wifiSsid, runtimeConfig.wifiPassword);
+      WiFi.scanNetworks(true /* async */);
+      staScanInFlight = true;
     }
     return;
   }
