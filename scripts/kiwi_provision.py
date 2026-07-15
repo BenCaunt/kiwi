@@ -81,21 +81,25 @@ def interface_ip(device):
     return ip or None
 
 
-def join_wifi(device, ssid, password, timeout_s=30):
+def join_wifi(device, ssid, password, timeout_s=30, attempts=3):
+    # networksetup can miss a freshly-appeared AP on the first try; retry.
     print(f"Switching {device} to '{ssid}'...")
     cmd = ["networksetup", "-setairportnetwork", device, ssid]
     if password:
         cmd.append(password)
-    result = run(cmd, timeout=timeout_s)
-    failure = (result.stdout + result.stderr).strip()
-    if "Failed" in failure or "Error" in failure:
-        return False, failure
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if interface_ip(device):
-            return True, None
-        time.sleep(1)
-    return False, "no IP address acquired"
+    failure = "no IP address acquired"
+    for attempt in range(attempts):
+        if attempt:
+            print(f"  retrying join ({attempt + 1}/{attempts})...")
+            time.sleep(4)
+        result = run(cmd, timeout=timeout_s)
+        failure = (result.stdout + result.stderr).strip() or failure
+        deadline = time.time() + timeout_s / attempts
+        while time.time() < deadline:
+            if interface_ip(device):
+                return True, None
+            time.sleep(1)
+    return False, failure
 
 
 def wait_for_ap_status(timeout_s, want_sta=False):
