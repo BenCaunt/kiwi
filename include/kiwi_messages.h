@@ -44,7 +44,8 @@ struct __attribute__((packed)) TwistReportPayload {
   uint8_t imu_ready;
   uint8_t encoder_ready_mask;
   uint16_t status_flags;
-  // BNO08x fused rotation vector (i, j, k, real) and raw accelerometer.
+  // BNO08x magnetometer-free Game Rotation Vector (i, j, k, real) and
+  // calibrated accelerometer. SLAM uses the quaternion relative to startup.
   float imu_quat_ijkr[4];
   float imu_accel_mps2[3];
 };

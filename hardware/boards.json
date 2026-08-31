@@ -11,6 +11,18 @@
       "first_seen_port": "/dev/cu.usbmodem101",
       "detected_at_utc": "2026-07-02T03:44:32Z",
       "notes": "User reported this currently connected board is the follower/slave. Motors are wired to D0/GPIO1, D1/GPIO2, D2/GPIO3. The second Dominion's unused channel input is wired to D3/GPIO4 and must be fed 1500 us or that ESC never arms (both channels of a Dominion need a valid centered pulse). Bench result 2026-07-02: all three motors spin; the D0 motor needs roughly 1850 us to overcome friction while D1/D2 move at 1650 us. Inter-board UART is not wired yet; no encoders installed (I2C mux absent)."
+    },
+    {
+      "role": "master",
+      "label": "kiwi master/camera ESP32-S3",
+      "platformio_board": "seeed_xiao_esp32s3",
+      "chip": "esp32s3",
+      "usb_vid_pid": "303A:1001",
+      "usb_serial": "E0:72:A1:FC:07:A0",
+      "mac": "e0:72:a1:fc:07:a0",
+      "first_seen_port": "/dev/cu.usbmodem101",
+      "detected_at_utc": "2026-07-18T04:03:07Z",
+      "notes": "Confirmed as the master by its camera, LD19, follower UART, Wi-Fi, and Zenoh boot log. Flashed with the bounded scheduler, batched LiDAR transport, and AP HTTP rebind fix on 2026-07-18. Port names are not stable; identify this board by USB serial/MAC before flashing."
     }
   ]
 }

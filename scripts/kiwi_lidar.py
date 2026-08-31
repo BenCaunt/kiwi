@@ -16,7 +16,9 @@ Usage:
   python3 scripts/kiwi_lidar.py --check    # CRC validation report only
   python3 scripts/kiwi_lidar.py --plot     # live polar plot (needs matplotlib)
 
-Importable: parse_frame(bytes) -> Frame | None (None = CRC failure).
+Importable:
+  parse_frame(bytes) -> Frame | None (None = CRC failure)
+  parse_frames(bytes) -> list[Frame | None] (one or more concatenated frames)
 """
 
 import argparse
@@ -70,6 +72,14 @@ def parse_frame(raw):
     return Frame(speed, start_deg, end_deg, ts, points)
 
 
+def parse_frames(raw):
+    """Decode a Zenoh sample containing one or more concatenated LD19 frames."""
+    if not raw or len(raw) % FRAME_LEN:
+        return []
+    return [parse_frame(raw[offset:offset + FRAME_LEN])
+            for offset in range(0, len(raw), FRAME_LEN)]
+
+
 class ScanAssembler:
     """Groups frames into full revolutions (angle wraps past 0)."""
 
@@ -113,16 +123,21 @@ def main():
 
     def listener(sample):
         raw = bytes(sample.payload)
-        stats["frames"] += 1
-        frame = parse_frame(raw)
-        if frame is None:
+        decoded = parse_frames(raw)
+        if not decoded:
+            stats["frames"] += 1
             stats["crc_bad"] += 1
             return
-        rev = assembler.add(frame)
-        if rev:
-            scans.append((time.time(), frame.speed_dps, rev))
-            if len(scans) > 10:
-                del scans[:5]
+        for frame in decoded:
+            stats["frames"] += 1
+            if frame is None:
+                stats["crc_bad"] += 1
+                continue
+            rev = assembler.add(frame)
+            if rev:
+                scans.append((time.time(), frame.speed_dps, rev))
+                if len(scans) > 10:
+                    del scans[:5]
 
     session = open_session(args.connect)
     sub = session.declare_subscriber(f"{args.namespace}/lidar/ld19/raw", listener)

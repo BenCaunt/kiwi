@@ -1,0 +1,51 @@
+[
+  {
+    "name": "map_to_body_quarter_turn",
+    "config": {
+      "kpX": 1,
+      "kpY": 1,
+      "kpYaw": 3,
+      "maxLinearSpeed": 10,
+      "maxAngularSpeed": 1,
+      "positionTolerance": 0.04,
+      "yawTolerance": 0.03490658503988659
+    },
+    "current": { "x": 0, "y": 0, "yaw": 1.5707963267948966 },
+    "target": { "x": 1, "y": 0, "yaw": 1.5707963267948966 },
+    "expected": { "vx": 6.123233995736766e-17, "vy": -1, "omega": 0 }
+  },
+  {
+    "name": "speed_limit_and_wrapped_yaw",
+    "config": {
+      "kpX": 2,
+      "kpY": 1,
+      "kpYaw": 2,
+      "maxLinearSpeed": 1,
+      "maxAngularSpeed": 0.5,
+      "positionTolerance": 0.04,
+      "yawTolerance": 0.03490658503988659
+    },
+    "current": { "x": 0, "y": 0, "yaw": 3.12413936106985 },
+    "target": { "x": 1, "y": 1, "yaw": -3.12413936106985 },
+    "expected": {
+      "vx": -0.886486011973527,
+      "vy": -0.4627553895691239,
+      "omega": 0.06981317007977239
+    }
+  },
+  {
+    "name": "position_settled_heading_finishes",
+    "config": {
+      "kpX": 0.8,
+      "kpY": 0.8,
+      "kpYaw": 1.5,
+      "maxLinearSpeed": 0.25,
+      "maxAngularSpeed": 1,
+      "positionTolerance": 0.04,
+      "yawTolerance": 0.03490658503988659
+    },
+    "current": { "x": 0.01, "y": 0.01, "yaw": 3.13 },
+    "target": { "x": 0, "y": 0, "yaw": -3.13 },
+    "expected": { "vx": 0, "vy": 0, "omega": 0.03477796076937967 }
+  }
+]

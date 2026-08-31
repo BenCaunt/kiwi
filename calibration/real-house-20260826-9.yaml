@@ -1,0 +1,44 @@
+{
+  "format": "kiwi-slam-calibration-v1",
+  "created_at": "2026-08-26T22:28:27.444629+00:00",
+  "source_run": "/Users/bencaunt/Documents/kiwi-robot/calibration/real-house-20260826-9",
+  "yaw_estimator": {
+    "wheel_yaw_scale": 0.9365857739520187,
+    "imu_yaw_scale": 1.009804518356628,
+    "initial_rate_bias_deg_s": -0.028990648430239446,
+    "imu_weight": 0.16761309308774688,
+    "bias_time_constant_s": 30.0,
+    "max_rate_bias_deg_s": 0.3,
+    "innovation_base_deg": 3.0,
+    "max_interval_s": 0.2,
+    "feedback_window_s": 15.0,
+    "feedback_min_span_s": 3.0,
+    "feedback_min_score": 0.9,
+    "feedback_min_hit_ratio": 0.75,
+    "feedback_max_rmse_m": 0.1,
+    "feedback_min_wall_support_ratio": 0.25,
+    "feedback_max_abs_yaw_rate_deg_s": 15.0,
+    "feedback_max_linear_speed_m_s": 0.03,
+    "initial_uncertainty_deg": 1.0,
+    "healthy_noise_deg_sqrt_s": 0.25,
+    "degraded_noise_deg_sqrt_s": 1.5
+  },
+  "lidar": {
+    "time_offset_ms": 9.091874087524866,
+    "x_m": -0.03549253994443659,
+    "y_m": 0.016307478666597663,
+    "yaw_deg": 0.0
+  },
+  "validation": {
+    "complete_scans": 3325,
+    "usable_scans": 3324,
+    "matched_scans": 3324,
+    "match_rate": 1.0,
+    "rotation_observations": 32,
+    "rotation_scan_increments": 822,
+    "wheel_rotation_rmse_deg": 2.6127814398924283,
+    "imu_rotation_rmse_deg": 5.822529965078222,
+    "planar_baseline_objective_m": 0.1806046392065837,
+    "planar_objective_m": 0.16984457819590057
+  }
+}

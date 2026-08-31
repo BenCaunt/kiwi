@@ -13,6 +13,7 @@ Teleop (default):
 Gamepad (proportional, needs pygame):
   python3 scripts/kiwi_teleop.py --gamepad
   left stick: translate   right stick X: rotate   ctrl-c: quit
+  Start/Menu (button 6): toggle teleop armed / agent control
   --speed/--omega set full-deflection rates; --ax-vx/--ax-vy/--ax-om remap axes.
 
 Axis test -- put the robot WHEELS UP first:
@@ -24,42 +25,21 @@ Axis test -- put the robot WHEELS UP first:
 """
 
 import argparse
-import json
 import select
 import sys
 import termios
 import time
 import tty
 
-import zenoh
+from kiwi_client import DEFAULT_ROBOT_YAW_DEG, KiwiClient
 
 CMD_PERIOD_S = 0.1  # robot failsafe stops motors 250 ms after the last command
 
 
-class Link:
-    def __init__(self, connect, namespace):
-        conf = zenoh.Config()
-        conf.insert_json5("mode", '"client"')
-        conf.insert_json5("connect/endpoints", json.dumps([connect]))
-        self.session = zenoh.open(conf)
-        self.pub = self.session.declare_publisher(f"{namespace}/cmd_vel")
-        self.measured = None
-        self.sub = self.session.declare_subscriber(
-            f"{namespace}/odom/twist", self._on_twist)
-
-    def _on_twist(self, sample):
-        try:
-            self.measured = json.loads(bytes(sample.payload).decode())
-        except (ValueError, UnicodeDecodeError):
-            pass
-
-    def send(self, vx, vy, omega):
-        self.pub.put(json.dumps({"vx": vx, "vy": vy, "omega": omega}))
-
-    def close(self):
-        self.send(0.0, 0.0, 0.0)
-        time.sleep(0.1)
-        self.session.close()
+def send_command(link, vx, vy, omega, active=True):
+    """Publish a direct command or a mux lease, depending on the topic."""
+    muxed = link.command_suffix != "cmd_vel"
+    link.send_twist(vx, vy, omega, active=active if muxed else None)
 
 
 def axis_test(link, speed, omega):
@@ -76,11 +56,11 @@ def axis_test(link, speed, omega):
         readings = []
         end = time.time() + 3.0
         while time.time() < end:
-            link.send(vx, vy, om)
+            send_command(link, vx, vy, om)
             time.sleep(CMD_PERIOD_S)
-            if link.measured is not None:
-                readings.append(link.measured)
-        link.send(0.0, 0.0, 0.0)
+            if link.odometry is not None:
+                readings.append(link.odometry)
+        send_command(link, 0.0, 0.0, 0.0, active=False)
         if readings:
             last = readings[-1]
             value = last.get("measured", {}).get(field, 0.0)
@@ -109,6 +89,7 @@ def teleop(link, speed, omega):
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     vx = vy = om = 0.0
+    active = False
     print(__doc__.split("Teleop (default):")[1].split("Axis test")[0])
     print(f"speed={speed:.2f} m/s, omega={omega:.2f} rad/s. Driving...")
     try:
@@ -119,29 +100,36 @@ def teleop(link, speed, omega):
                 key = sys.stdin.read(1)
                 if key == "w":
                     vx, vy, om = speed, 0.0, 0.0
+                    active = True
                 elif key == "s":
                     vx, vy, om = -speed, 0.0, 0.0
+                    active = True
                 elif key == "a":
                     vx, vy, om = 0.0, speed, 0.0
+                    active = True
                 elif key == "d":
                     vx, vy, om = 0.0, -speed, 0.0
+                    active = True
                 elif key == "q":
                     vx, vy, om = 0.0, 0.0, omega
+                    active = True
                 elif key == "e":
                     vx, vy, om = 0.0, 0.0, -omega
+                    active = True
                 elif key == " ":
                     vx = vy = om = 0.0
+                    active = False
                 elif key == "+":
                     speed = min(speed + 0.05, 1.0)
                     omega = min(omega + 0.25, 6.0)
                 elif key == "-":
                     speed = max(speed - 0.05, 0.05)
                     omega = max(omega - 0.25, 0.25)
-            link.send(vx, vy, om)
+            send_command(link, vx, vy, om, active=active)
             now = time.time()
             if now - last_print > 0.5:
                 last_print = now
-                m = (link.measured or {}).get("measured", {})
+                m = (link.odometry or {}).get("measured", {})
                 print(f"\rcmd vx={vx:+.2f} vy={vy:+.2f} om={om:+.2f} | "
                       f"meas vx={m.get('vx', 0):+.2f} "
                       f"vy={m.get('vy', 0):+.2f} "
@@ -151,40 +139,127 @@ def teleop(link, speed, omega):
     except KeyboardInterrupt:
         pass
     finally:
+        send_command(link, 0.0, 0.0, 0.0, active=False)
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         print("\nstopping")
 
 
-GAMEPAD_DEADZONE = 0.12
+GAMEPAD_DEADZONE = 0.08
+GAMEPAD_PERIOD_S = 0.05
 
 
-def _deadzone(value):
-    if abs(value) < GAMEPAD_DEADZONE:
+def _deadzone(value, deadzone=GAMEPAD_DEADZONE):
+    if abs(value) <= deadzone:
         return 0.0
     sign = 1.0 if value > 0 else -1.0
-    return sign * min((abs(value) - GAMEPAD_DEADZONE) / (1.0 - GAMEPAD_DEADZONE), 1.0)
+    return sign * min((abs(value) - deadzone) / (1.0 - deadzone), 1.0)
 
 
-def gamepad_teleop(link, speed, omega, ax_vx, ax_vy, ax_om):
+class GamepadHandoff:
+    """Edge-triggered teleop/agent ownership toggle."""
+
+    def __init__(self):
+        self.teleop_enabled = True
+        self._button_down = False
+
+    def update(self, button_down):
+        button_down = bool(button_down)
+        toggled = button_down and not self._button_down
+        if toggled:
+            self.teleop_enabled = not self.teleop_enabled
+        self._button_down = button_down
+        return toggled
+
+    def reclaim_for_stick_input(self, stick_active):
+        """Guarantee that deliberate stick motion always restores teleop."""
+        if stick_active and not self.teleop_enabled:
+            self.teleop_enabled = True
+            return True
+        return False
+
+
+def gamepad_teleop(
+    link, speed, omega, ax_vx, ax_vy, ax_om,
+    deadzone=GAMEPAD_DEADZONE, handoff_button=6,
+):
     import os
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     import pygame
     pygame.init()
     pygame.joystick.init()
+    handoff = GamepadHandoff()
+    pad = None
+    pad_instance_id = None
+    handoff_available = False
+
+    def attach(device_index=0):
+        nonlocal pad, pad_instance_id, handoff_available
+        candidate = pygame.joystick.Joystick(device_index)
+        candidate.init()
+        pad = candidate
+        pad_instance_id = pad.get_instance_id()
+        handoff_available = 0 <= handoff_button < pad.get_numbuttons()
+        print(
+            f"\ngamepad connected: {pad.get_name()} "
+            f"({pad.get_numaxes()} axes, instance {pad_instance_id})"
+        )
+        print(
+            f"full deflection = {speed:.2f} m/s translate, "
+            f"{omega:.2f} rad/s rotate; deadzone={deadzone:.0%}."
+        )
+        if handoff_available:
+            print(
+                f"Start/Menu button {handoff_button}: toggle TELEOP / AGENT "
+                "control; centered sticks release the mux and moving a stick "
+                "always reclaims TELEOP. ctrl-c quits."
+            )
+        else:
+            print(
+                "No handoff button is available; centered sticks release the "
+                "mux. ctrl-c quits."
+            )
+
     if pygame.joystick.get_count() == 0:
         sys.exit("no gamepad detected (pair/plug it in, then rerun)")
-    pad = pygame.joystick.Joystick(0)
-    pad.init()
-    print(f"gamepad: {pad.get_name()} ({pad.get_numaxes()} axes)")
-    print(f"full deflection = {speed:.2f} m/s translate, {omega:.2f} rad/s rotate. ctrl-c to quit.")
-
-    def axis(i):
-        return _deadzone(float(pad.get_axis(i))) if i < pad.get_numaxes() else 0.0
+    attach()
 
     last_print = 0.0
     try:
         while True:
-            pygame.event.pump()
+            for event in pygame.event.get():
+                if (event.type == pygame.JOYDEVICEREMOVED and pad is not None and
+                        getattr(event, "instance_id", None) ==
+                        pad_instance_id):
+                    send_command(link, 0.0, 0.0, 0.0, active=False)
+                    print("\ngamepad disconnected; teleop released")
+                    pad.quit()
+                    pad = None
+                    pad_instance_id = None
+                    handoff_available = False
+                elif event.type == pygame.JOYDEVICEADDED and pad is None:
+                    attach(getattr(event, "device_index", 0))
+            if pad is None:
+                # Some SDL backends do not deliver a hot-plug event. Polling
+                # provides a safe fallback while continuing to publish release.
+                send_command(link, 0.0, 0.0, 0.0, active=False)
+                if pygame.joystick.get_count() > 0:
+                    attach()
+                else:
+                    time.sleep(0.10)
+                    continue
+
+            button_down = (
+                bool(pad.get_button(handoff_button))
+                if handoff_available else False
+            )
+            if handoff.update(button_down):
+                mode = "TELEOP" if handoff.teleop_enabled else "AGENT"
+                send_command(link, 0.0, 0.0, 0.0, active=False)
+                print(f"\ncontrol handed to {mode}")
+            def axis(index):
+                return (_deadzone(float(pad.get_axis(index)), deadzone)
+                        if index < pad.get_numaxes() else 0.0)
+
             x = axis(ax_vy)   # left stick X: + is right
             y = axis(ax_vx)   # left stick Y: + is down
             r = axis(ax_om)   # right stick X: + is right
@@ -192,21 +267,39 @@ def gamepad_teleop(link, speed, omega, ax_vx, ax_vy, ax_om):
             if mag > 1.0:
                 x /= mag
                 y /= mag
-            vx = -y * speed       # stick up = forward
-            vy = -x * speed       # stick left = +vy (robot left)
-            om = -r * omega       # stick right = clockwise = -omega
-            link.send(vx, vy, om)
+            stick_active = any(abs(value) > 0.0 for value in (x, y, r))
+            if handoff.reclaim_for_stick_input(stick_active):
+                print("\nstick input reclaimed TELEOP control")
+            if handoff.teleop_enabled:
+                vx = -y * speed       # stick up = forward
+                vy = -x * speed       # stick left = +vy (robot left)
+                om = -r * omega       # stick right = clockwise = -omega
+                active = stick_active
+            else:
+                vx = vy = om = 0.0
+                active = False
+            link.send_twist(
+                vx, vy, om,
+                active=active if link.command_suffix != "cmd_vel" else None,
+                hold_s=GAMEPAD_PERIOD_S,
+            )
             now = time.time()
             if now - last_print > 0.5:
                 last_print = now
-                m = (link.measured or {}).get("measured", {})
-                print(f"\rcmd vx={vx:+.2f} vy={vy:+.2f} om={om:+.2f} | "
+                m = (link.odometry or {}).get("measured", {})
+                mode = "TELEOP" if handoff.teleop_enabled else "AGENT "
+                print(f"\r{mode} | cmd vx={vx:+.2f} vy={vy:+.2f} om={om:+.2f} | "
                       f"meas vx={m.get('vx', 0):+.2f} vy={m.get('vy', 0):+.2f} "
                       f"om={m.get('omega', 0):+.2f}   ", end="", flush=True)
-            time.sleep(0.05)
+            time.sleep(GAMEPAD_PERIOD_S)
     except KeyboardInterrupt:
         pass
     finally:
+        send_command(link, 0.0, 0.0, 0.0, active=False)
+        if pad is not None:
+            pad.quit()
+        pygame.joystick.quit()
+        pygame.quit()
         print("\nstopping")
 
 
@@ -216,6 +309,10 @@ def main():
     parser.add_argument("--connect", default="tcp/127.0.0.1:7447",
                         help="zenoh router endpoint (default local zenohd)")
     parser.add_argument("--namespace", default="kiwi/xiao")
+    parser.add_argument(
+        "--command-topic", default="cmd_vel",
+        help=("namespaced command topic suffix; launch.py uses cmd_vel/teleop "
+              "behind the command mux"))
     parser.add_argument("--speed", type=float, default=0.15,
                         help="linear speed in m/s (default 0.15)")
     parser.add_argument("--omega", type=float, default=1.0,
@@ -227,15 +324,32 @@ def main():
     parser.add_argument("--ax-vx", type=int, default=1, help="gamepad axis for forward/back")
     parser.add_argument("--ax-vy", type=int, default=0, help="gamepad axis for strafe")
     parser.add_argument("--ax-om", type=int, default=2, help="gamepad axis for rotation")
+    parser.add_argument(
+        "--gamepad-deadzone", type=float, default=GAMEPAD_DEADZONE,
+        help=f"centered-stick deadzone fraction (default {GAMEPAD_DEADZONE:g})")
+    parser.add_argument(
+        "--handoff-button", type=int, default=6,
+        help="gamepad button that toggles teleop/agent control; -1 disables")
+    parser.add_argument(
+        "--robot-yaw-deg", type=float, default=DEFAULT_ROBOT_YAW_DEG,
+        help=("raw drivetrain +X yaw counter-clockwise from lidar/camera "
+              f"forward (default {DEFAULT_ROBOT_YAW_DEG:g} deg)"))
     args = parser.parse_args()
+    if not 0.0 <= args.gamepad_deadzone < 1.0:
+        parser.error("--gamepad-deadzone must be in [0, 1)")
+    if args.handoff_button < -1:
+        parser.error("--handoff-button must be -1 or nonnegative")
 
-    link = Link(args.connect, args.namespace)
+    link = KiwiClient(args.connect, args.namespace, args.robot_yaw_deg,
+                      commanding=True, command_suffix=args.command_topic)
+    print(f"frame correction: {link.robot_yaw_deg:+g} deg robot yaw")
     try:
         if args.test:
             axis_test(link, args.speed, args.omega)
         elif args.gamepad:
             gamepad_teleop(link, args.speed, args.omega,
-                           args.ax_vx, args.ax_vy, args.ax_om)
+                           args.ax_vx, args.ax_vy, args.ax_om,
+                           args.gamepad_deadzone, args.handoff_button)
         else:
             teleop(link, args.speed, args.omega)
     finally:

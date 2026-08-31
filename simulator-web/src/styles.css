@@ -1,0 +1,378 @@
+:root {
+  color: #e6eff3;
+  background: #091016;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+button,
+select {
+  color: inherit;
+  font: inherit;
+}
+
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid #76efd1;
+  outline-offset: 2px;
+}
+
+#app,
+#viewport {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#viewport {
+  display: block;
+  touch-action: none;
+}
+
+.topbar {
+  position: fixed;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 82px;
+  padding: 18px 24px;
+  background: linear-gradient(180deg, rgba(6, 11, 15, 0.92), rgba(6, 11, 15, 0));
+  pointer-events: none;
+}
+
+.topbar > * {
+  pointer-events: auto;
+}
+
+.eyebrow {
+  margin: 0 0 3px;
+  color: #72e5cc;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 570;
+  letter-spacing: -0.025em;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.topbar-actions label {
+  display: grid;
+  gap: 4px;
+  color: #90a0a9;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+button,
+select {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(154, 181, 193, 0.22);
+  border-radius: 5px;
+  background: rgba(15, 24, 30, 0.88);
+  color: #dae7eb;
+  font-size: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+button:hover,
+select:hover {
+  border-color: rgba(114, 229, 204, 0.58);
+  background: rgba(24, 38, 45, 0.94);
+}
+
+.telemetry {
+  position: fixed;
+  z-index: 2;
+  top: 104px;
+  left: 24px;
+  width: 220px;
+  padding: 14px 15px 12px;
+  border: 1px solid rgba(138, 170, 183, 0.18);
+  border-radius: 7px;
+  background: rgba(8, 15, 20, 0.78);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(14px);
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 12px;
+  color: #91a2aa;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #72e5cc;
+  box-shadow: 0 0 12px rgba(114, 229, 204, 0.75);
+}
+
+.status-separator {
+  color: #40515a;
+}
+
+#transport-state.online {
+  color: #72e5cc;
+}
+
+#transport-state.connecting {
+  color: #d6b66d;
+}
+
+dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+dl div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(130, 157, 168, 0.1);
+}
+
+dt,
+dd {
+  margin: 0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
+dt {
+  color: #758892;
+  letter-spacing: 0.1em;
+}
+
+dd {
+  color: #dce8ec;
+}
+
+dd.warning {
+  color: #ffae66;
+}
+
+.world-card {
+  position: fixed;
+  z-index: 2;
+  right: 24px;
+  bottom: 22px;
+  width: min(370px, calc(100vw - 48px));
+  padding: 17px 18px 15px;
+  border: 1px solid rgba(182, 174, 153, 0.2);
+  border-radius: 8px;
+  background:
+    linear-gradient(145deg, rgba(38, 32, 27, 0.78), rgba(9, 16, 21, 0.84));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(16px);
+  pointer-events: none;
+}
+
+.world-style {
+  margin: 0 0 5px;
+  color: #d2ad78;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.world-card h2 {
+  margin: 0;
+  color: #edf0e9;
+  font-size: 17px;
+  font-weight: 580;
+  letter-spacing: -0.015em;
+}
+
+#world-description {
+  margin: 7px 0 11px;
+  color: #abb6b7;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+#world-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#world-tags li {
+  padding: 4px 6px;
+  border: 1px solid rgba(205, 183, 145, 0.18);
+  border-radius: 3px;
+  background: rgba(154, 117, 76, 0.09);
+  color: #c7beb0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.controls {
+  position: fixed;
+  z-index: 2;
+  left: 24px;
+  bottom: 22px;
+  display: flex;
+  align-items: end;
+  gap: 13px;
+  color: #91a2aa;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 24px);
+  gap: 3px;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  margin-right: 3px;
+  padding: 0 5px;
+  border: 1px solid rgba(150, 181, 194, 0.28);
+  border-radius: 4px;
+  background: rgba(13, 22, 27, 0.78);
+  color: #d9e6ea;
+  font-family: inherit;
+  font-size: 9px;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.25);
+}
+
+.control-copy p {
+  margin: 0 0 4px;
+}
+
+.control-copy strong {
+  color: #72e5cc;
+  letter-spacing: 0.12em;
+}
+
+.reticle {
+  position: fixed;
+  z-index: 1;
+  top: 50%;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  opacity: 0.38;
+  pointer-events: none;
+}
+
+.reticle span {
+  position: absolute;
+  background: #d9f9f2;
+}
+
+.reticle span:first-child {
+  top: 10px;
+  left: 0;
+  width: 22px;
+  height: 1px;
+}
+
+.reticle span:last-child {
+  top: 0;
+  left: 10px;
+  width: 1px;
+  height: 22px;
+}
+
+@media (max-width: 680px) {
+  .topbar {
+    align-items: flex-start;
+    padding: 14px;
+  }
+
+  .topbar-actions {
+    display: grid;
+    grid-template-columns: repeat(2, auto);
+  }
+
+  .topbar-actions label {
+    grid-column: 1 / -1;
+  }
+
+  .telemetry {
+    top: 132px;
+    left: 14px;
+    width: 190px;
+  }
+
+  .controls {
+    left: 14px;
+    bottom: 14px;
+  }
+
+  .world-card {
+    right: 14px;
+    bottom: 14px;
+    width: min(300px, calc(100vw - 28px));
+  }
+
+  .control-copy p:last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .world-card {
+    display: none;
+  }
+}

@@ -4,7 +4,7 @@
 
 #include "robot_config.h"
 
-// Motor -> encoder mapping test. Drives each motor output (D0/D1/D2) one at a
+// Motor -> encoder mapping test. Drives each configured motor output one at a
 // time at low power while sampling all three AS5600s behind the PCA9548A, then
 // reports which encoder channel moved, in which direction, and the suggested
 // kEncoderTcaChannels / kEncoderPolarity values for robot_config.h. Runs

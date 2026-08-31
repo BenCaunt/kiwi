@@ -1,0 +1,44 @@
+{
+  "format": "kiwi-slam-calibration-v1",
+  "created_at": "2026-08-25T19:46:41.924070+00:00",
+  "source_run": "/Users/bencaunt/Documents/kiwi-robot/calibration/sim-rotation-20260825",
+  "yaw_estimator": {
+    "wheel_yaw_scale": 0.9936028823658607,
+    "imu_yaw_scale": 0.9979390315261564,
+    "initial_rate_bias_deg_s": 0.05784838026460208,
+    "imu_weight": 0.85,
+    "bias_time_constant_s": 30.0,
+    "max_rate_bias_deg_s": 0.3,
+    "innovation_base_deg": 3.0,
+    "max_interval_s": 0.2,
+    "feedback_window_s": 15.0,
+    "feedback_min_span_s": 3.0,
+    "feedback_min_score": 0.9,
+    "feedback_min_hit_ratio": 0.75,
+    "feedback_max_rmse_m": 0.1,
+    "feedback_min_wall_support_ratio": 0.25,
+    "feedback_max_abs_yaw_rate_deg_s": 15.0,
+    "feedback_max_linear_speed_m_s": 0.03,
+    "initial_uncertainty_deg": 1.0,
+    "healthy_noise_deg_sqrt_s": 0.25,
+    "degraded_noise_deg_sqrt_s": 1.5
+  },
+  "lidar": {
+    "time_offset_ms": -4.419271778440875,
+    "x_m": -0.004210637655189323,
+    "y_m": 0.012520739434862375,
+    "yaw_deg": 0.0
+  },
+  "validation": {
+    "complete_scans": 120,
+    "usable_scans": 119,
+    "matched_scans": 119,
+    "match_rate": 1.0,
+    "rotation_observations": 3,
+    "rotation_scan_increments": 72,
+    "wheel_rotation_rmse_deg": 0.995687287684921,
+    "imu_rotation_rmse_deg": 0.13145311642936264,
+    "planar_baseline_objective_m": 0.009013760916660968,
+    "planar_objective_m": 0.006256173725961877
+  }
+}

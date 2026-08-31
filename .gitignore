@@ -8,3 +8,11 @@ include/local_zenoh.h
 .DS_Store
 __pycache__/
 *.pyc
+*.egg-info/
+maps/
+node_modules/
+simulator-web/dist/
+calibration/*/events.jsonl
+calibration/*/lidar.bin
+calibration/*/odom.jsonl
+calibration/*/run.json

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0f14" />
+    <title>Kiwi Simulator</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="viewport" aria-label="Interactive Kiwi robot simulation"></canvas>
+
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">KIWI ROBOT</p>
+          <h1>Simulator</h1>
+        </div>
+        <div class="topbar-actions">
+          <label>
+            <span>World</span>
+            <select id="world-select" aria-label="Simulation world"></select>
+          </label>
+          <button id="view-button" type="button">Follow robot</button>
+          <button id="pause-button" type="button">Pause</button>
+          <button id="reset-button" type="button">Reset</button>
+        </div>
+      </header>
+
+      <aside class="telemetry" aria-live="polite">
+        <div class="status-line">
+          <span class="status-dot"></span>
+          <span id="run-state">RUNNING</span>
+          <span class="status-separator">/</span>
+          <span id="transport-state">ZENOH OFFLINE</span>
+          <span class="status-separator">/</span>
+          <span id="sim-time">0.0 s</span>
+        </div>
+        <dl>
+          <div><dt>X</dt><dd id="pose-x">0.00 m</dd></div>
+          <div><dt>Y</dt><dd id="pose-y">0.00 m</dd></div>
+          <div><dt>YAW</dt><dd id="pose-yaw">0.0°</dd></div>
+          <div><dt>SPEED</dt><dd id="speed">0.00 m/s</dd></div>
+          <div><dt>LIDAR</dt><dd id="lidar">—</dd></div>
+          <div><dt>STATE</dt><dd id="collision">CLEAR</dd></div>
+        </dl>
+      </aside>
+
+      <aside class="world-card" aria-live="polite">
+        <p id="world-style" class="world-style">Single-level home</p>
+        <h2 id="world-name">Contemporary Family Home</h2>
+        <p id="world-description"></p>
+        <ul id="world-tags" aria-label="Home features"></ul>
+      </aside>
+
+      <section class="controls" aria-label="Keyboard controls">
+        <div class="key-grid" aria-hidden="true">
+          <span></span><kbd>W</kbd><span></span>
+          <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
+        </div>
+        <div class="control-copy">
+          <p><strong>MOVE</strong> forward / strafe</p>
+          <p><kbd>Q</kbd><kbd>E</kbd> rotate</p>
+          <p><kbd>SPACE</kbd> stop · <kbd>R</kbd> reset · <kbd>P</kbd> pause</p>
+        </div>
+      </section>
+
+      <div class="reticle" aria-hidden="true"><span></span><span></span></div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -423,11 +423,16 @@ bool initImu() {
     return false;
   }
 
-  const bool rotationOk = imu.enableRotationVector(kiwi_config::kImuReportIntervalMs);
+  // SLAM only needs heading relative to startup. The ordinary Rotation Vector
+  // is referenced to magnetic north, so motors, wiring, and indoor metal can
+  // produce large yaw corrections. The Game Rotation Vector deliberately
+  // excludes the magnetometer and is therefore the safer short-run odometry
+  // reference; LiDAR structure and loop closure remove its slow gyro drift.
+  const bool rotationOk = imu.enableGameRotationVector(kiwi_config::kImuReportIntervalMs);
   delay(10);
   const bool accelOk = imu.enableAccelerometer(kiwi_config::kImuReportIntervalMs);
   imuReportsEnabled = rotationOk || accelOk;
-  Serial.printf("BNO08x ready at 0x%02x, reports=%s\n",
+  Serial.printf("BNO08x ready at 0x%02x, game-vector reports=%s\n",
                 imuAddress,
                 imuReportsEnabled ? "enabled" : "failed");
   return true;
@@ -438,16 +443,19 @@ void updateImu() {
     return;
   }
   if (imu.wasReset()) {
-    imuReportsEnabled = imu.enableRotationVector(kiwi_config::kImuReportIntervalMs);
+    imuReportsEnabled = imu.enableGameRotationVector(kiwi_config::kImuReportIntervalMs);
     imuReportsEnabled = imu.enableAccelerometer(kiwi_config::kImuReportIntervalMs) || imuReportsEnabled;
   }
   for (uint8_t i = 0; i < 4 && imu.getSensorEvent(); ++i) {
     const uint8_t eventId = imu.getSensorEventID();
-    if (eventId == SENSOR_REPORTID_ROTATION_VECTOR) {
-      imuQuat[0] = imu.getQuatI();
-      imuQuat[1] = imu.getQuatJ();
-      imuQuat[2] = imu.getQuatK();
-      imuQuat[3] = imu.getQuatReal();
+    if (eventId == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
+      // Game Rotation Vector has its own union member and accessors in the
+      // SparkFun BNO08x library. The ordinary getQuat* accessors are for the
+      // magnetometer-fused Rotation Vector report.
+      imuQuat[0] = imu.getGameQuatI();
+      imuQuat[1] = imu.getGameQuatJ();
+      imuQuat[2] = imu.getGameQuatK();
+      imuQuat[3] = imu.getGameQuatReal();
     } else if (eventId == SENSOR_REPORTID_ACCELEROMETER) {
       imuAccel[0] = imu.getAccelX();
       imuAccel[1] = imu.getAccelY();

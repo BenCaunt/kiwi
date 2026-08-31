@@ -1,0 +1,4 @@
+eclipse-zenoh>=1.0
+pillow>=10.0
+pygame>=2.5
+websockets>=14.0

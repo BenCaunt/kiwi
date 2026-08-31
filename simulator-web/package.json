@@ -1,0 +1,33 @@
+{
+  "name": "kiwi-simulator-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bridge": "python3 ../scripts/kiwi_sim_bridge.py",
+    "map": "python3 ../scripts/kiwi_sim_mapping_harness.py",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "install:browser": "playwright-core install chromium",
+    "setup:headless": "npm run install:browser && npm run build",
+    "headless": "node headless/supervisor.mjs",
+    "benchmark:headless": "tsx src/headless/nonvisual-benchmark.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "playwright-core": "1.55.0",
+    "three": "0.185.1",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/three": "0.185.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

@@ -1,0 +1,6 @@
+numpy>=1.26
+scipy>=1.11
+eclipse-zenoh>=1.0
+rerun-sdk>=0.22,<0.23
+pillow>=10.0
+websockets>=14.0

@@ -67,6 +67,7 @@ struct RuntimeConfig {
 RuntimeConfig runtimeConfig;
 Preferences configPrefs;
 WebServer httpServer(80);
+bool httpServerStarted = false;
 uint32_t driveParamsAckedVersion = 0xffffffff;
 uint32_t lastDriveParamsSendMs = 0;
 bool rebootPending = false;
@@ -90,6 +91,17 @@ uint32_t lastStaAttemptMs = 0;
 uint32_t lastZenohAttemptMs = 0;
 constexpr size_t kCameraHeaderBytes = 32;
 constexpr size_t kLd19FrameBytes = 47;
+// The LD19 produces roughly 450-500 small UART frames/s. Sending each 47-byte
+// frame as a separate reliable Zenoh operation starves every lower-rate topic.
+// Twenty frames remain comfortably below the 1500-byte IP MTU while reducing
+// transport calls by about 20x. Consumers accept one or more concatenated
+// frames per sample.
+constexpr size_t kLd19FramesPerBatch = 20;
+constexpr size_t kLd19BatchBytes = kLd19FrameBytes * kLd19FramesPerBatch;
+constexpr size_t kMaxLd19FramesPerLoop = 32;
+constexpr size_t kMaxFollowerPacketsPerLoop = 16;
+constexpr uint32_t kLd19BatchMaxAgeMs = 50;
+constexpr uint32_t kTwistPublishPeriodMs = 50;  // latest report at <=20 Hz
 
 constexpr char kZenohCameraKey[] = ROBOT_NAMESPACE "/camera/jpeg";
 constexpr char kZenohLidarRawKey[] = ROBOT_NAMESPACE "/lidar/ld19/raw";
@@ -107,7 +119,6 @@ z_owned_publisher_t lidarPub;
 z_owned_publisher_t twistPub;
 z_owned_publisher_t statusPub;
 z_owned_subscriber_t cmdVelSub;
-SemaphoreHandle_t zenohPublishMutex = nullptr;
 
 bool zenohReady = false;
 bool cameraReady = false;
@@ -125,8 +136,22 @@ uint32_t lidarPublished = 0;
 uint32_t lidarPublishErrors = 0;
 uint32_t twistPublished = 0;
 uint32_t twistPublishErrors = 0;
+uint32_t lidarBatchesPublished = 0;
 uint32_t lastCameraPublishMs = 0;
 uint32_t lastStatusPublishMs = 0;
+uint32_t lastTwistPublishMs = 0;
+
+uint8_t lidarBatch[kLd19BatchBytes] = {};
+size_t lidarBatchFrames = 0;
+uint32_t lidarBatchStartedMs = 0;
+TwistReportPayload latestTwistReport = {};
+bool twistReportPending = false;
+
+uint32_t lastLoopStartUs = 0;
+uint32_t maxLoopGapUs = 0;
+uint32_t maxPublishUs = 0;
+uint32_t lidarRxHighWater = 0;
+uint32_t followerRxHighWater = 0;
 
 struct Ld19Reader {
   uint8_t frame[kLd19FrameBytes] = {};
@@ -343,7 +368,10 @@ void startAccessPoint(bool staConnected) {
     return;
   }
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(kApSsid, kApPassword);
+  if (!WiFi.softAP(kApSsid, kApPassword)) {
+    Serial.println("Unable to start the master provisioning AP.");
+    return;
+  }
   // Re-assert after the mode change; modem power-save throttles TCP badly.
   WiFi.setSleep(false);
   apStarted = true;
@@ -352,6 +380,17 @@ void startAccessPoint(bool staConnected) {
                 kApPassword,
                 WiFi.softAPIP().toString().c_str(),
                 staConnected ? " (sharing STA channel)" : " (STA not connected)");
+
+  // When a visible STA network fails authentication, setup() has already
+  // started the HTTP listener in WIFI_STA mode before the fallback AP is
+  // created. The STA -> AP_STA mode transition can invalidate that socket:
+  // DHCP on KIWI-MASTER still works, but port 80 never answers. Rebind after
+  // the AP netif exists. Routes remain registered across WebServer::begin().
+  if (httpServerStarted) {
+    httpServer.begin();
+    Serial.printf("Provisioning HTTP server rebound on http://%s/\n",
+                  WiFi.softAPIP().toString().c_str());
+  }
 }
 
 void startWifi() {
@@ -400,22 +439,19 @@ void startWifi() {
 }
 
 bool publishZenohBytes(z_owned_publisher_t *publisher, const uint8_t *data, size_t len) {
-  if (!zenohReady || zenohPublishMutex == nullptr) {
+  if (!zenohReady) {
     return false;
   }
 
+  const uint32_t startedUs = micros();
   z_owned_bytes_t payload;
   if (z_bytes_copy_from_buf(&payload, data, len) < 0) {
     return false;
   }
 
-  if (xSemaphoreTake(zenohPublishMutex, pdMS_TO_TICKS(250)) != pdTRUE) {
-    z_bytes_drop(z_bytes_move(&payload));
-    return false;
-  }
-
   const bool ok = z_publisher_put(z_publisher_loan(publisher), z_bytes_move(&payload), NULL) >= 0;
-  xSemaphoreGive(zenohPublishMutex);
+  const uint32_t elapsedUs = static_cast<uint32_t>(micros() - startedUs);
+  maxPublishUs = max(maxPublishUs, elapsedUs);
   return ok;
 }
 
@@ -645,11 +681,31 @@ void publishCameraFrame() {
   }
 }
 
-void publishLidarFrame(const uint8_t *frame) {
-  if (publishZenohBytes(&lidarPub, frame, kLd19FrameBytes)) {
-    ++lidarPublished;
+void publishLidarBatch() {
+  if (lidarBatchFrames == 0) {
+    return;
+  }
+
+  const uint32_t frameCount = static_cast<uint32_t>(lidarBatchFrames);
+  const size_t byteCount = lidarBatchFrames * kLd19FrameBytes;
+  if (publishZenohBytes(&lidarPub, lidarBatch, byteCount)) {
+    lidarPublished += frameCount;
+    ++lidarBatchesPublished;
   } else {
-    ++lidarPublishErrors;
+    lidarPublishErrors += frameCount;
+  }
+  lidarBatchFrames = 0;
+  lidarBatchStartedMs = 0;
+}
+
+void queueLidarFrame(const uint8_t *frame) {
+  if (lidarBatchFrames == 0) {
+    lidarBatchStartedMs = millis();
+  }
+  memcpy(lidarBatch + lidarBatchFrames * kLd19FrameBytes, frame, kLd19FrameBytes);
+  ++lidarBatchFrames;
+  if (lidarBatchFrames == kLd19FramesPerBatch) {
+    publishLidarBatch();
   }
 }
 
@@ -710,7 +766,7 @@ void publishTwistReport(const TwistReportPayload &report) {
 }
 
 void publishStatus() {
-  char payload[512];
+  char payload[768];
   const int written = snprintf(
       payload,
       sizeof(payload),
@@ -720,7 +776,9 @@ void publishStatus() {
       "\"follower_reports\":%lu,\"follower_bad_packets\":%lu,"
       "\"velocity_commands\":%lu,\"camera_published\":%lu,\"camera_errors\":%lu,"
       "\"lidar_published\":%lu,\"lidar_errors\":%lu,"
-      "\"twist_published\":%lu,\"twist_errors\":%lu,\"free_heap\":%lu}",
+      "\"lidar_batches\":%lu,\"twist_published\":%lu,\"twist_errors\":%lu,"
+      "\"loop_gap_max_us\":%lu,\"publish_max_us\":%lu,"
+      "\"lidar_rx_high_water\":%lu,\"follower_rx_high_water\":%lu,\"free_heap\":%lu}",
       static_cast<unsigned long>(millis()),
       WiFi.status() == WL_CONNECTED ? "true" : "false",
       WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "",
@@ -736,8 +794,13 @@ void publishStatus() {
       static_cast<unsigned long>(cameraPublishErrors),
       static_cast<unsigned long>(lidarPublished),
       static_cast<unsigned long>(lidarPublishErrors),
+      static_cast<unsigned long>(lidarBatchesPublished),
       static_cast<unsigned long>(twistPublished),
       static_cast<unsigned long>(twistPublishErrors),
+      static_cast<unsigned long>(maxLoopGapUs),
+      static_cast<unsigned long>(maxPublishUs),
+      static_cast<unsigned long>(lidarRxHighWater),
+      static_cast<unsigned long>(followerRxHighWater),
       static_cast<unsigned long>(ESP.getFreeHeap()));
 
   if (written > 0) {
@@ -749,13 +812,17 @@ void publishStatus() {
 
 void processFollowerUart() {
   Packet packet;
-  while (followerReader.readFrom(FollowerUart, packet)) {
+  followerRxHighWater = max(followerRxHighWater,
+                            static_cast<uint32_t>(FollowerUart.available()));
+  size_t processed = 0;
+  while (processed < kMaxFollowerPacketsPerLoop &&
+         followerReader.readFrom(FollowerUart, packet)) {
+    ++processed;
     if (packet.type == MessageType::TwistReport &&
         packet.payloadLength == sizeof(TwistReportPayload)) {
-      TwistReportPayload report = {};
-      memcpy(&report, packet.payload, sizeof(report));
+      memcpy(&latestTwistReport, packet.payload, sizeof(latestTwistReport));
       ++followerReports;
-      publishTwistReport(report);
+      twistReportPending = true;
     } else if (packet.type == MessageType::DriveParamsAck &&
                packet.payloadLength == sizeof(kiwi::DriveParamsAckPayload)) {
       kiwi::DriveParamsAckPayload ack = {};
@@ -1013,8 +1080,7 @@ void maintainNetwork(uint32_t nowMs) {
     return;
   }
 
-  if (!zenohReady && zenohPublishMutex != nullptr &&
-      nowMs - lastZenohAttemptMs >= kZenohRetryMs) {
+  if (!zenohReady && nowMs - lastZenohAttemptMs >= kZenohRetryMs) {
     lastZenohAttemptMs = nowMs;
     zenohReady = startZenohSession();
   }
@@ -1025,19 +1091,29 @@ void startHttpServer() {
   httpServer.on("/config", HTTP_POST, handleHttpConfig);
   httpServer.onNotFound([]() { sendHttpError(404, "not found"); });
   httpServer.begin();
+  httpServerStarted = true;
   Serial.printf("Provisioning HTTP server on http://%s/ (also on STA IP when connected)\n",
                 WiFi.softAPIP().toString().c_str());
 }
 
 void processLidar() {
+  lidarRxHighWater = max(lidarRxHighWater,
+                         static_cast<uint32_t>(LidarUart.available()));
   uint8_t frame[kLd19FrameBytes] = {};
-  while (lidarReader.readFrom(LidarUart, frame)) {
+  size_t processed = 0;
+  while (processed < kMaxLd19FramesPerLoop &&
+         lidarReader.readFrom(LidarUart, frame)) {
+    ++processed;
     if (!ld19FrameCrcOk(frame)) {
       ++lidarBadFrames;
       continue;
     }
     ++lidarFrames;
-    publishLidarFrame(frame);
+    queueLidarFrame(frame);
+  }
+  if (lidarBatchFrames > 0 &&
+      millis() - lidarBatchStartedMs >= kLd19BatchMaxAgeMs) {
+    publishLidarBatch();
   }
 }
 
@@ -1083,11 +1159,16 @@ void setup() {
   cameraReady = initCamera();
   startWifi();
   startHttpServer();
-  zenohPublishMutex = xSemaphoreCreateMutex();
   // Zenoh starts from maintainNetwork() once the STA link is up.
 }
 
 void loop() {
+  const uint32_t loopStartUs = micros();
+  if (lastLoopStartUs != 0) {
+    maxLoopGapUs = max(maxLoopGapUs, loopStartUs - lastLoopStartUs);
+  }
+  lastLoopStartUs = loopStartUs;
+
   processFollowerUart();
   processLidar();
   httpServer.handleClient();
@@ -1106,6 +1187,11 @@ void loop() {
     Serial.flush();
     ESP.restart();
   }
+  if (twistReportPending && nowMs - lastTwistPublishMs >= kTwistPublishPeriodMs) {
+    lastTwistPublishMs = nowMs;
+    twistReportPending = false;
+    publishTwistReport(latestTwistReport);
+  }
   if (nowMs - lastCameraPublishMs >= kiwi_config::kCameraPublishPeriodMs) {
     lastCameraPublishMs = nowMs;
     publishCameraFrame();
@@ -1116,7 +1202,8 @@ void loop() {
     publishStatus();
     Serial.printf("master status zenoh=%s wifi=%s lidar=%lu lidar_bytes=%lu lidar_bad=%lu "
                   "follower=%lu follower_bad=%lu cmd=%lu cam=%lu/%lu lid_pub=%lu/%lu "
-                  "tw_pub=%lu/%lu heap=%lu\n",
+                  "lid_batch=%lu tw_pub=%lu/%lu loop_max=%luus pub_max=%luus "
+                  "rx_hi=%lu/%lu heap=%lu\n",
                   zenohReady ? "ok" : "off",
                   WiFi.status() == WL_CONNECTED ? "ok" : "off",
                   static_cast<unsigned long>(lidarFrames),
@@ -1129,9 +1216,18 @@ void loop() {
                   static_cast<unsigned long>(cameraPublishErrors),
                   static_cast<unsigned long>(lidarPublished),
                   static_cast<unsigned long>(lidarPublishErrors),
+                  static_cast<unsigned long>(lidarBatchesPublished),
                   static_cast<unsigned long>(twistPublished),
                   static_cast<unsigned long>(twistPublishErrors),
+                  static_cast<unsigned long>(maxLoopGapUs),
+                  static_cast<unsigned long>(maxPublishUs),
+                  static_cast<unsigned long>(lidarRxHighWater),
+                  static_cast<unsigned long>(followerRxHighWater),
                   static_cast<unsigned long>(ESP.getFreeHeap()));
+    maxLoopGapUs = 0;
+    maxPublishUs = 0;
+    lidarRxHighWater = 0;
+    followerRxHighWater = 0;
   }
 
   delay(1);

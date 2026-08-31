@@ -81,7 +81,20 @@ def interface_ip(device):
     return ip or None
 
 
-def join_wifi(device, ssid, password, timeout_s=30, attempts=3):
+def wifi_joined(device, ssid, expected_subnet_prefix=None):
+    """Return the acquired IP only when the Mac is on the requested network."""
+    if current_ssid(device) != ssid:
+        return None
+    ip = interface_ip(device)
+    if ip is None:
+        return None
+    if expected_subnet_prefix and not ip.startswith(expected_subnet_prefix):
+        return None
+    return ip
+
+
+def join_wifi(device, ssid, password, timeout_s=30, attempts=3,
+              expected_subnet_prefix=None):
     # networksetup can miss a freshly-appeared AP on the first try; retry.
     print(f"Switching {device} to '{ssid}'...")
     cmd = ["networksetup", "-setairportnetwork", device, ssid]
@@ -92,14 +105,27 @@ def join_wifi(device, ssid, password, timeout_s=30, attempts=3):
         if attempt:
             print(f"  retrying join ({attempt + 1}/{attempts})...")
             time.sleep(4)
-        result = run(cmd, timeout=timeout_s)
-        failure = (result.stdout + result.stderr).strip() or failure
+        try:
+            result = run(cmd, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            failure = f"networksetup timed out after {timeout_s} seconds"
+            result = None
+        if result is not None:
+            output = (result.stdout + result.stderr).strip()
+            if output:
+                failure = output
+            if result.returncode != 0 and not output:
+                failure = f"networksetup exited {result.returncode}"
         deadline = time.time() + timeout_s / attempts
         while time.time() < deadline:
-            if interface_ip(device):
+            ip = wifi_joined(device, ssid, expected_subnet_prefix)
+            if ip:
+                print(f"  joined '{ssid}' at {ip}")
                 return True, None
             time.sleep(1)
-    return False, failure
+    observed_ssid = current_ssid(device) or "not associated"
+    observed_ip = interface_ip(device) or "no IP"
+    return False, f"{failure}; still on '{observed_ssid}' at {observed_ip}"
 
 
 def wait_for_ap_status(timeout_s, want_sta=False):
@@ -169,7 +195,15 @@ def build_config(args):
 def post_config(host, config):
     redacted = {k: ("***" if k == "wifi_password" else v) for k, v in config.items()}
     print(f"POST http://{host}/config: {json.dumps(redacted)}")
-    result = http_json("POST", f"http://{host}/config", config, timeout=8)
+    try:
+        result = http_json("POST", f"http://{host}/config", config, timeout=8)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        sys.exit(
+            "The robot did not acknowledge the config request before the HTTP "
+            f"connection closed ({exc}).\n"
+            "The result is indeterminate: it may have saved the settings and rebooted. "
+            "Do not retry blindly; power-cycle once and verify Zenoh/LiDAR traffic."
+        )
     print(f"Robot response: {json.dumps(result)}")
     if not result.get("ok"):
         sys.exit(1)
@@ -208,7 +242,7 @@ def main():
                         "(default: auto-detected before switching to the AP)")
     parser.add_argument("--zenoh-port", type=int, default=7447)
     parser.add_argument("--zenoh-connect",
-                        help="full zenoh locator, overrides --pc-ip (e.g. tcp/192.168.8.42:7447)")
+                        help="full zenoh locator, overrides --pc-ip (e.g. udp/192.168.8.42:7447)")
     parser.add_argument("--zenoh-mode", choices=["client", "peer"])
     parser.add_argument("--wheel-radius", type=float, help="wheel radius in meters")
     parser.add_argument("--base-radius", type=float, help="drive base radius in meters")
@@ -224,6 +258,9 @@ def main():
     parser.add_argument("--pid-ki", type=float, help="wheel PI integral gain, %% per m/s*s")
     parser.add_argument("--closed-loop", type=int, choices=[0, 1],
                         help="1 = feedforward + PI on wheel speed, 0 = feedforward only")
+    parser.add_argument("--defer-network-verify", action="store_true",
+                        help="save config and restore this Mac immediately after the robot "
+                        "accepts it; use when the target network is intentionally offline")
     args = parser.parse_args()
 
     # Direct mode: talk to the given host, no WiFi switching.
@@ -246,16 +283,33 @@ def main():
     ssid = current_ssid(device)
     on_ap = ssid == AP_SSID or (ip or "").startswith(AP_SUBNET_PREFIX)
 
+    # Never leave the Mac on the robot AP if we cannot identify the network
+    # to restore afterward.
+    if not on_ap and ssid is None:
+        sys.exit("Could not determine the current SSID; refusing to switch WiFi because "
+                 "the original network could not be restored safely.")
+
     if args.status:
-        if not on_ap:
-            ok, err = join_wifi(device, AP_SSID, AP_PASSWORD)
-            if not ok:
-                sys.exit(f"Could not join {AP_SSID}: {err}")
+        restore_failure = None
         try:
-            print_status(wait_for_ap_status(20))
+            if not on_ap:
+                ok, err = join_wifi(device, AP_SSID, AP_PASSWORD,
+                                    expected_subnet_prefix=AP_SUBNET_PREFIX)
+                if not ok:
+                    sys.exit(f"Could not join {AP_SSID}: {err}")
+            status = wait_for_ap_status(20)
+            if status is None:
+                sys.exit(f"Joined {AP_SSID}, but the robot did not answer at "
+                         f"http://{AP_HOST}/status")
+            print_status(status)
         finally:
             if not on_ap and ssid:
-                join_wifi(device, ssid, None)
+                ok, err = join_wifi(device, ssid, None)
+                if not ok:
+                    restore_failure = err
+                    print(f"CRITICAL: could not restore '{ssid}': {err}", file=sys.stderr)
+        if restore_failure:
+            sys.exit(f"Could not restore the original WiFi network: {restore_failure}")
         return
 
     if on_ap:
@@ -281,35 +335,65 @@ def main():
         if ip is None:
             sys.exit("Could not detect this Mac's IP; pass --pc-ip explicitly.")
         args.pc_ip = ip
-        print(f"Using laptop IP {ip}: zenoh_connect=tcp/{ip}:{args.zenoh_port}")
+        print(f"Using laptop IP {ip}: zenoh_connect=udp/{ip}:{args.zenoh_port}")
 
     config = build_config(args)
     if not config:
         parser.error("nothing to configure; pass --status or at least one setting")
 
-    ok, err = join_wifi(device, AP_SSID, AP_PASSWORD)
-    if not ok:
-        sys.exit(f"Could not join {AP_SSID}: {err}\nIs the robot powered on?")
-
     status = None
+    verification_deferred = False
+    restore_failure = None
     try:
+        ok, err = join_wifi(device, AP_SSID, AP_PASSWORD,
+                            expected_subnet_prefix=AP_SUBNET_PREFIX)
+        if not ok:
+            sys.exit(f"Could not join {AP_SSID}: {err}\nIs the robot powered on?")
+
+        if wait_for_ap_status(15) is None:
+            sys.exit(f"Joined {AP_SSID}, but the robot did not answer at "
+                     f"http://{AP_HOST}/status")
+
         result = post_config(AP_HOST, config)
-        if result.get("reboot"):
+        if args.defer_network_verify:
+            verification_deferred = True
+            if result.get("reboot"):
+                print("Robot accepted the config and is rebooting; network verification deferred.")
+            else:
+                print("Robot accepted the config; network verification deferred.")
+        elif result.get("reboot"):
             print("Robot is rebooting to join the network; waiting on the AP...")
             time.sleep(8)
             # The AP drops during reboot; macOS may wander off it. Re-join.
-            join_wifi(device, AP_SSID, AP_PASSWORD)
+            ok, err = join_wifi(device, AP_SSID, AP_PASSWORD,
+                                expected_subnet_prefix=AP_SUBNET_PREFIX)
+            if not ok:
+                sys.exit(f"Could not rejoin {AP_SSID} after the robot rebooted: {err}")
             status = wait_for_ap_status(60, want_sta=True)
         else:
             status = wait_for_ap_status(15)
     finally:
         if ssid:
             print(f"Switching {device} back to '{ssid}'...")
-            join_wifi(device, ssid, None)
+            # The normal provisioning workflow targets the original network,
+            # so reuse its supplied password instead of relying on Keychain.
+            restore_password = args.password if args.ssid == ssid else None
+            ok, err = join_wifi(device, ssid, restore_password)
+            if not ok:
+                restore_failure = err
+                print(f"CRITICAL: could not restore '{ssid}': {err}", file=sys.stderr)
+
+    if restore_failure:
+        sys.exit(f"Could not restore the original WiFi network: {restore_failure}")
+    if verification_deferred:
+        print("Configuration saved. Bring the target network online, then verify over its LAN.")
+        return
 
     print()
     print_status(status)
-    if status and not status.get("sta_connected"):
+    if status is None:
+        sys.exit("The robot never returned status after reboot; provisioning is unverified.")
+    if not status.get("sta_connected"):
         print("\nThe robot did not report joining the network -- check the SSID/password\n"
               "and re-run, or watch its USB serial output.")
         sys.exit(1)
@@ -326,6 +410,8 @@ def main():
                 time.sleep(2)
         print(f"Robot claims {sta_ip} but is not reachable from here yet; "
               "give it a moment or check that both are on the same network.")
+        sys.exit(1)
+    sys.exit("The robot reported a connection without a station IP address.")
 
 
 if __name__ == "__main__":
