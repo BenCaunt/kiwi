@@ -1,5 +1,10 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import {
+  DRACOLoader,
+  DRACO_GLTF_CONFIG,
+} from "three/addons/loaders/DRACOLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import type {
   FloorZone,
@@ -28,8 +33,13 @@ import {
   type CameraCalibration,
   type KiwiVisionRenderer,
 } from "../vision/camera";
+import { renderedMeshBounds } from "./model-bounds";
 
 const ROBOT_RADIUS = 0.13;
+const ROBOT_MODEL_URL = "/assets/kiwi/kiwi-robot.glb";
+// The Onshape assembly's camera points along +Z. The simulator's aligned
+// forward axis is +X, so rotate the exported Y-up model by 90 degrees.
+const ROBOT_MODEL_YAW = Math.PI / 2;
 
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
@@ -44,7 +54,7 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
-function createRobot(): THREE.Group {
+function createProceduralRobot(): THREE.Group {
   const robot = new THREE.Group();
 
   const bodyMaterial = new THREE.MeshStandardMaterial({
@@ -112,6 +122,67 @@ function createRobot(): THREE.Group {
     wheel.castShadow = true;
     robot.add(wheel);
   }
+  return robot;
+}
+
+function configureRobotModel(model: THREE.Object3D): void {
+  model.name = "kiwi-onshape-model";
+  model.rotation.y = ROBOT_MODEL_YAW;
+  model.updateMatrixWorld(true);
+
+  // Onshape exports around the assembly origin rather than the contact plane.
+  // Ground the rendered mesh from its actual bounds so future CAD revisions do
+  // not require a hand-tuned vertical offset.
+  // The optimized CAD mesh can retain unreferenced vertices outside the
+  // rendered triangles. Three.js' default object bounds include those stale
+  // vertices, which lifted this model well above the floor. Ground only from
+  // vertices actually referenced by the mesh indices.
+  const bounds = renderedMeshBounds(model);
+  if (!bounds.isEmpty()) model.position.y = -bounds.min.y;
+  model.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.castShadow = true;
+    child.receiveShadow = true;
+  });
+}
+
+function createRobot(): THREE.Group {
+  const robot = new THREE.Group();
+  robot.name = "kiwi-robot";
+
+  // Keep a lightweight fallback visible while the CAD mesh is decoded, and if
+  // an asset deployment is incomplete. Successful loading swaps it atomically.
+  const fallback = createProceduralRobot();
+  fallback.name = "kiwi-procedural-fallback";
+  robot.userData.modelSource = "procedural-loading";
+  robot.add(fallback);
+
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath(DRACO_GLTF_CONFIG);
+  const loader = new GLTFLoader();
+  loader.setDRACOLoader(dracoLoader);
+  loader.load(
+    ROBOT_MODEL_URL,
+    ({ scene }) => {
+      configureRobotModel(scene);
+      dracoLoader.dispose();
+      if (robot.userData.disposed) {
+        disposeObject(scene);
+        return;
+      }
+      robot.remove(fallback);
+      disposeObject(fallback);
+      robot.add(scene);
+      robot.userData.modelSource = "onshape-glb";
+    },
+    undefined,
+    (error) => {
+      dracoLoader.dispose();
+      robot.userData.modelSource = "procedural-fallback";
+      console.warn("Unable to load the Kiwi Onshape model; using fallback geometry", error);
+    },
+  );
+
   return robot;
 }
 
@@ -1053,6 +1124,7 @@ export class SimulatorScene implements KiwiVisionRenderer {
     window.removeEventListener("resize", this.resize);
     this.controls.dispose();
     disposeObject(this.worldRoot);
+    this.robot.userData.disposed = true;
     disposeObject(this.robot);
     this.lidarGeometry.dispose();
     this.sensorTarget.dispose();
